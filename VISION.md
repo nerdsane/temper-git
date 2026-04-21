@@ -114,4 +114,5 @@ to github.com.
 - [docs/adr/0001-temper-git-mission.md](docs/adr/0001-temper-git-mission.md)
 - [docs/adr/0002-temper-native-scm.md](docs/adr/0002-temper-native-scm.md)
 - [docs/adr/0003-byte-exact-git-compat.md](docs/adr/0003-byte-exact-git-compat.md)
+- [docs/adr/0004-per-repo-libsql-gcs.md](docs/adr/0004-per-repo-libsql-gcs.md)
 - [docs/rfc/0001-temper-git-v1-architecture.md](docs/rfc/0001-temper-git-v1-architecture.md)

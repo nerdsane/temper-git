@@ -214,6 +214,9 @@ shapes match github.com structurally.
 
 - [ADR-0001](0001-temper-git-mission.md)
 - [ADR-0002](0002-temper-native-scm.md)
+- [ADR-0004](0004-per-repo-libsql-gcs.md) — per-repo libSQL storage; BLOB
+  bytes are round-trip-tested for hash-byte-match against the same harness
+  regardless of storage vendor.
 - [RFC-0001](../rfc/0001-temper-git-v1-architecture.md)
 - [CODING_GUIDELINES.md](../../CODING_GUIDELINES.md) — hash-integrity, canonical serialization rules
 - Git object format: https://git-scm.com/book/en/v2/Git-Internals-Git-Objects

@@ -154,6 +154,7 @@ See [CODING_GUIDELINES.md](CODING_GUIDELINES.md) for the full list.
 - [docs/adr/0001-temper-git-mission.md](docs/adr/0001-temper-git-mission.md)
 - [docs/adr/0002-temper-native-scm.md](docs/adr/0002-temper-native-scm.md)
 - [docs/adr/0003-byte-exact-git-compat.md](docs/adr/0003-byte-exact-git-compat.md)
+- [docs/adr/0004-per-repo-libsql-gcs.md](docs/adr/0004-per-repo-libsql-gcs.md)
 - [docs/rfc/0001-temper-git-v1-architecture.md](docs/rfc/0001-temper-git-v1-architecture.md)
 - [temper/CLAUDE.md](temper/CLAUDE.md) — Temper kernel discipline we inherit.
 - Git object format reference:

@@ -14,9 +14,10 @@ Concrete architecture for temper-git v1:
 - Which IOA entities exist and with what fields.
 - Which WASM integrations serve which HTTP paths.
 - What Temper-kernel deltas we need (HttpEndpoint entity, streaming WASM I/O).
-- How storage scales (inline TreeEntry content vs blob store).
+- How storage is laid out: per-repo libSQL DB, WAL shipped to GCS, no
+  spill-tier complexity (see [ADR-0004](../adr/0004-per-repo-libsql-gcs.md)).
 - What auth looks like end-to-end.
-- How the product is deployed (K8s topology).
+- How the product is deployed (K8s topology) for an air-gapped GCP sandbox.
 - Phase plan for delivery.
 
 ## Scope of v1
@@ -175,21 +176,31 @@ Invariants:
 
 One git blob. States: `Durable`.
 
+Storage substrate: per-repo libSQL database, SQLite `BLOB` column. No
+spill tier; content lives inline on the row regardless of size. Durable
+backing is GCS via libsql-server's bottomless WAL shipping
+(see [ADR-0004](../adr/0004-per-repo-libsql-gcs.md)).
+
 Fields:
 - `Id: Edm.String` — SHA-1 hex.
 - `RepositoryId: Edm.String`
 - `Size: Edm.Int64` — byte length.
-- `Content: Edm.String?` — inline if `Size <= INLINE_BLOB_LIMIT` (default
-  1 MiB). Stored as latin-1 string (OData constraint; bytes preserved).
-- `BlobStoreRef: Edm.String?` — if `Size > INLINE_BLOB_LIMIT`,
-  `/_internal/blobs/<repo>/<sha>` pointer into Temper's blob store.
-- `CanonicalBytes: Edm.Binary?` — blob header bytes (`blob <size>\0`)
+- `Content: Edm.Binary` — the raw blob bytes. SQLite BLOB column;
+  handles multi-GB values natively without the TOAST performance cliff
+  Postgres has. No separate blob-store indirection.
+- `CanonicalBytes: Edm.Binary` — blob header bytes (`blob <size>\0`)
   stored alongside; the full serialized bytes are `CanonicalBytes +
-  content`. Used to verify the hash without re-encoding.
+  Content`. Used to verify the hash without re-encoding.
 
 Invariants:
-- Exactly one of `Content` or `BlobStoreRef` is set.
-- `sha1(canonical_bytes + resolve_content()) == Id`.
+- `sha1(CanonicalBytes ++ Content) == Id`.
+- `length(Content) == Size`.
+
+Operational notes:
+- A single BLOB is capped at SQLite's limit (~1 GiB default,
+  configurable to ~2.1 GiB). For code repos this is plenty.
+- >1 GB blobs (ML models, large binary archives) would need chunking;
+  out of scope for v1. Flagged in Open Questions.
 
 ### `Tag`
 
@@ -421,33 +432,49 @@ manifest; Temper sets up the streaming plumbing on dispatch.
 
 ## Storage sizing
 
-### Blobs
+See [ADR-0004](../adr/0004-per-repo-libsql-gcs.md) for the substrate
+decision. Summary: per-repo libSQL database, SQLite BLOB inline for all
+blobs, WAL shipped to GCS as the durable backing.
 
-- `INLINE_BLOB_LIMIT = 1 MiB` (configurable per-deployment).
-- Larger blobs spill to blob store at `/_internal/blobs/{repo}/{sha}`.
-- Typical source repo: 90%+ of blobs are <10 KiB; median blob <1 KiB.
-- Pathological case (binary assets, vendored PDFs): handled by blob
-  store; no impact on entity row size.
+### Per-repo database footprint
 
-### Trees
+For the existing dark-helix repos (small, text-heavy):
+- `dark-helix.git` current: ~5 MB of source → ~5 MB SQLite DB.
+- `darkhelix-users.git` projected @ 6 months: ~500 MB of kafka-client
+  code + config → ~500 MB SQLite DB. All inline BLOBs.
+- `helix.git` mirror: ~200 MB → ~200 MB SQLite DB.
 
-- Tree entries average 10–50 per tree in real repos.
-- `CanonicalBytes` length: ~35 bytes per entry + filename length.
-- A typical 20-entry tree is ~1–2 KiB — fits comfortably inline.
+Per-DB ceiling is ~1 TB before operational pain. Any single repo near
+that limit should be re-evaluated (likely misuse, e.g. vendoring
+third-party binaries that belong in a package registry).
 
-### Commits
+### Total GCS footprint
 
-- `CanonicalBytes` length: ~200 bytes for small commits, up to ~5 KiB
-  for annotated ones. Inline.
+GCS holds the WAL object stream for each libSQL database plus
+versioned snapshots. Overhead is ~2× the live DB size (WAL retention
++ prior-version snapshots). Bucket budget for v1:
 
-### Postgres footprint estimate
+- dark-helix factory initial: 4 repos × ~200 MB average × 2× overhead =
+  ~1.6 GB. Round up to a 10 GB bucket allocation.
+- Growth: object-store storage is effectively unbounded; lifecycle
+  rules trim old WAL snapshots (default: keep 30 days).
 
-For the existing dark-helix repos (empty today, will grow):
-- `darkhelix-users.git` projected @ 6 months: ~500 MB repo → ~50 MB
-  entity state (blobs mostly inline, big binary assets via blob
-  store).
-- 1 GB Postgres per ~10 GB of repo state. Provision a 10 GB Postgres
-  for v1 with room for ~100 GB of repo content.
+### Trees and Commits
+
+- Tree entries: average 10–50 per tree; `CanonicalBytes` ~35 bytes per
+  entry + filename. A 20-entry tree is ~1–2 KiB.
+- Commits: `CanonicalBytes` ~200 bytes for small commits, up to ~5 KiB
+  for annotated ones.
+
+Both trivially inline in SQLite rows; no sizing concern.
+
+### Hot cache PVC
+
+The libsql-server pod keeps a local copy of each active DB in a PVC
+for read speed (embedded-replica-style). Cache size is tunable; v1
+default is 100 GiB PVC, which comfortably holds all four dark-helix
+repos with room for 5–10× growth. PVC autoscaling is on (GKE supports
+it).
 
 ## Auth flow
 
@@ -469,29 +496,80 @@ authenticated).
 
 ## Deployment topology
 
+Air-gapped GCP sandbox. Inbound from dark-helix and human clients only
+via in-cluster DNS. No public endpoint in v1.
+
 ```
 Namespace: temper-git (separate from darkhelix)
-  ├─ Deployment: temper-git
-  │    └─ 1 replica of the Temper pod with temper-git os-app baked in
-  ├─ Service: temper-git (ClusterIP, port 80)
-  ├─ PVC: temper-git-blob-store (for >1MB blob spills)
-  ├─ Secret: temper-git-db-url (Cloud SQL Auth Proxy → dedicated Postgres)
-  └─ Deployment: postgres-proxy-temper-git (Cloud SQL Auth Proxy instance)
+  ├─ StatefulSet: libsql-server       (1 replica; 1 per-repo DB)
+  │    ├─ Pod: libsql-server-0
+  │    │    ├─ image: libsql-server:<pinned>
+  │    │    ├─ volumeMount: /var/lib/libsql (PVC hot cache, 100 GiB)
+  │    │    ├─ env: LIBSQL_BOTTOMLESS_BUCKET=gs://temper-git-wal
+  │    │    ├─ env: LIBSQL_BOTTOMLESS_ENDPOINT=https://storage.googleapis.com
+  │    │    ├─ env: AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY (HMAC for GCS interop)
+  │    │    └─ serviceAccountName: libsql-server-ksa (Workload Identity → GCS)
+  │    └─ PVC: libsql-hot-cache (100 GiB, autoscales)
+  ├─ Deployment: temper-git            (1 replica)
+  │    ├─ image: temper-git:vX.Y.Z
+  │    ├─ env: TURSO_PLATFORM_URL=http://libsql-server.temper-git.svc.cluster.local:8080
+  │    ├─ env: TURSO_PLATFORM_AUTH_TOKEN (from Secret)
+  │    └─ command: temper serve --storage turso
+  ├─ Service: libsql-server            (ClusterIP :8080, internal only)
+  ├─ Service: temper-git               (ClusterIP :80, internal only)
+  ├─ ServiceAccount: libsql-server-ksa → GCP IAM on gs://temper-git-wal
+  └─ Secret: libsql-bottomless-creds (GCS HMAC key-pair)
+
+GCS bucket: gs://temper-git-wal
+  ├─ Object versioning: enabled, 30-day retention (lifecycle rule)
+  ├─ Access: Workload Identity only (libsql-server-ksa), no public reads
+  └─ Network: Private Google Access (no public IP egress required)
 ```
 
-Image: `us-central1-docker.pkg.dev/darkhelix-sandbox/temper-git/temper-git:vX.Y.Z`.
+### Swap path to Turso Cloud
+
+The only coupling between the temper-git image and libsql-server is
+the libSQL wire protocol. To switch to Turso Cloud:
+
+1. Point `TURSO_PLATFORM_URL` + `TURSO_PLATFORM_AUTH_TOKEN` at Turso.
+2. Dump-restore each per-repo DB (libSQL's native dump works against
+   Turso Cloud endpoints).
+3. Roll temper-git pod. Decommission the self-hosted StatefulSet.
+
+No image rebuild, no schema change, no WASM rebuild. Zero code diff.
+
+### Image
+
+`us-central1-docker.pkg.dev/darkhelix-sandbox/temper-git/temper-git:vX.Y.Z`.
 Built from `temper-git/Dockerfile` which FROMs the Temper upstream image
-at the pinned submodule commit and COPYs `os-app/` + WASMs on top.
+at the pinned submodule commit and COPYs `os-app/` + WASM modules on top.
 
-Service DNS: `temper-git.temper-git.svc.cluster.local`.
+`us-central1-docker.pkg.dev/darkhelix-sandbox/temper-git/libsql-server:<pinned>`.
+Mirror of the upstream libsql-server image pinned to a specific version.
+Pulled to Artifact Registry so the cluster never reaches out for it.
 
-For the dark-helix factory consumption, the existing `temper-git.darkhelix.svc.cluster.local`
-Service will be repointed (via `ExternalName` or an ingress reroute) to
-the new service once the migration importer runs.
+### Repo DNS cutover
+
+The existing `temper-git.darkhelix.svc.cluster.local` Service (backed by
+the old nginx+CGI pod) gets repointed to the new `temper-git` namespace
+in Phase 4, after the migration importer runs. Pre-migration,
+dark-helix agents use either endpoint; post-migration, only the new.
 
 ## Phase plan
 
-### Phase 1 — Foundation (~4 weeks, target v0.1.0)
+### Phase 1 — Foundation (~5 weeks, target v0.1.0)
+
+Week 0: **Storage substrate verification (ADR-0004 gate)**
+- Deploy libsql-server StatefulSet + GCS bucket + Workload Identity in
+  the `temper-git` namespace of the sandbox cluster.
+- Verify: pod boot → create a DB → write rows → kill pod → new pod →
+  rows reappear via GCS WAL replay. Bit-exact.
+- Verify: Temper's `temper-store-turso::TursoEventStore` connects to
+  self-hosted libsql-server and round-trips entity writes.
+- Verify: 500 MiB BLOB insert + read-back hash check.
+- Verify: GCS egress via Private Google Access only (no public route).
+- Verify: per-DB provisioning via libsql admin API.
+- If any fail, ADR-0004 goes back to Proposed and we revisit.
 
 Weeks 1–2: **Entity model + canonical serialization**
 - IOA specs + CSDL for all entities in §"Entity model".
@@ -510,9 +588,12 @@ Weeks 2–3: **Protocol handlers**
 - `http_call_streaming` (K-2).
 - Round-trip integration test: clone → commit → push → clone → diff.
 
-Week 4: **REST subset + auth**
+Weeks 4–5: **REST subset + auth + repo provisioning**
 - `github_rest_contents`, `_pulls`, `_refs`, `_branches`, `_commits`,
   `_merges`, `_repos`.
+- `repository_provision` WASM: on `Repository.Create`, spin a new
+  libSQL DB via admin API, update the Repository row with
+  `LibsqlDbName`.
 - GitToken auth resolution.
 - GitHub API shape tests against fixtures.
 - v0.1.0 release.
@@ -549,8 +630,11 @@ Week 4: **REST subset + auth**
    now; when SHA-256 lands, add a `HashAlgo` field to Repository and
    select serialization accordingly.
 
-2. **Inline vs blob store threshold.** v1 picks 1 MiB. Tunable per
-   deployment. Do we tune per-repo? Probably not in v1; just a global.
+2. **Multi-GB blob chunking.** SQLite's BLOB max is ~1 GiB default (up
+   to ~2.1 GiB configured). Code repos never hit this. ML model
+   registries and media asset repos might. When a real user wants
+   >1 GB blobs, we add chunking (Content split across rows with a
+   ChunkIndex); out of scope for v1.
 
 3. **GraphQL in v1 vs v2.** REST alone covers 95% of agent use cases.
    GraphQL is better for humans and modern CLIs. We defer to v2 unless
@@ -566,6 +650,19 @@ Week 4: **REST subset + auth**
    dark-helix today, repos are near-empty, so migration is cheap —
    recommend shipping migration with v1 anyway.
 
+6. **libsql-server HA for v1.** Single replica means pod-loss
+   downtime during WAL replay from GCS (seconds-to-minutes). For
+   sandbox this is acceptable. Production deployments need
+   leader+follower libSQL, planned for Phase 2. Flag this explicitly
+   in deployment docs so no one treats sandbox as HA.
+
+7. **GCS HMAC vs Workload-Identity-native.** libsql-server's S3 client
+   uses HMAC auth by convention. GCS supports HMAC via the
+   interoperability layer, but Workload Identity is the idiomatic GCP
+   pattern. If libsql-server adds native GCP auth, switch. Until then,
+   HMAC key stored in a Secret is the v1 path; rotation cadence
+   documented in deployment notes.
+
 ## Sign-off required
 
 Review this RFC before Phase 1 starts. Areas most in need of scrutiny:
@@ -575,8 +672,10 @@ Review this RFC before Phase 1 starts. Areas most in need of scrutiny:
   `repo:write`, etc.) match what GitHub PATs use?
 - Kernel deltas: will upstream Temper accept HttpEndpoint + streaming
   WASM I/O?
-- Deployment topology: own namespace + own Postgres is heavy — any
-  lighter shape acceptable?
+- Deployment topology: own namespace + own libsql-server StatefulSet
+  + GCS bucket (per [ADR-0004](../adr/0004-per-repo-libsql-gcs.md)).
+  For sandbox this is a fair footprint; any concerns about the
+  libsql-server operational maturity we haven't covered?
 
 Once this RFC lands `Accepted`, Phase 1 work starts. New RFCs for Phase 2+
 as those come into focus.
@@ -586,6 +685,7 @@ as those come into focus.
 - [ADR-0001](../adr/0001-temper-git-mission.md)
 - [ADR-0002](../adr/0002-temper-native-scm.md)
 - [ADR-0003](../adr/0003-byte-exact-git-compat.md)
+- [ADR-0004](../adr/0004-per-repo-libsql-gcs.md)
 - Git object format: https://git-scm.com/book/en/v2/Git-Internals-Git-Objects
 - Git pack format: https://git-scm.com/docs/pack-format
 - Git smart-HTTP: https://git-scm.com/docs/http-protocol

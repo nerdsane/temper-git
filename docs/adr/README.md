@@ -17,6 +17,10 @@ temper-git uses MADR (Markdown Architectural Decision Records).
   extensions.
 - [0003-byte-exact-git-compat.md](0003-byte-exact-git-compat.md) — byte-exact
   git compatibility is a product guarantee, enforced by CI.
+- [0004-per-repo-libsql-gcs.md](0004-per-repo-libsql-gcs.md) — storage is
+  a per-repo libSQL database with WAL shipped to GCS. Self-hosted
+  libsql-server for air-gapped sandbox; Turso-Cloud-swappable via
+  env-var change.
 
 ## Proposed
 

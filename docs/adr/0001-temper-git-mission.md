@@ -97,9 +97,14 @@ emitted must hash identically to what `git hash-object` produces.
 
 - **A sibling project** at `~/Development/temper-git/`, not a subdirectory
   of dark-helix. Own Cargo workspace, own Dockerfile, own K8s deployment,
-  own Postgres, own release cadence.
+  own libSQL + GCS-backed storage substrate (see
+  [ADR-0004](0004-per-repo-libsql-gcs.md)), own release cadence.
 - **The temper/ submodule** pinned at a specific upstream Temper commit.
   We do not fork Temper's kernel; we extend it via OS app + WASM.
+- **Per-repo libSQL database + GCS-backed WAL.** See
+  [ADR-0004](0004-per-repo-libsql-gcs.md). Self-hosted libsql-server
+  for air-gapped GCP sandbox operation; swap-path to Turso Cloud via
+  env-var change with zero code diff.
 - **Byte-exact compatibility** — every third-party git tool must work
   against temper-git without modification. GitHub REST v3 response shapes
   must match github.com structurally.
@@ -191,6 +196,9 @@ agent-remembered-state with source code.
 
 ## References
 
+- [ADR-0004: Per-repo libSQL with GCS-backed WAL](0004-per-repo-libsql-gcs.md) —
+  storage substrate decision that operationalizes this mission for an
+  air-gapped GCP deployment.
 - [VISION.md](../../VISION.md)
 - [ADR-0002: Temper-native SCM substrate](0002-temper-native-scm.md)
 - [ADR-0003: Byte-exact git compatibility](0003-byte-exact-git-compat.md)

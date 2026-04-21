@@ -131,6 +131,35 @@ integrity).
    github.com response (field names, types, required presence). The
    comparison ignores values but asserts structural compatibility.
 
+### Storage (per ADR-0004)
+
+1. **Per-repo libSQL DB is the only storage.** No spill tier, no
+   separate blob store. Blob content lives in the Blob row as a SQLite
+   BLOB column. Do not add a secondary content-addressed store; if
+   we ever need one (for chunked >1 GB blobs), it goes through a new
+   ADR.
+
+2. **Every write is a single libSQL transaction.** A git push that
+   creates N blobs + M trees + one commit + advances a ref is ONE
+   transaction on that repo's DB. Either it all lands or none lands.
+   If you're tempted to split this into multiple POST requests
+   without transaction grouping, stop — `temper-store-turso` exposes
+   batch semantics.
+
+3. **Never hold a whole pack in memory.** Pack sizes can reach
+   hundreds of MB. Use streaming readers on the incoming side;
+   stream BLOBs into libSQL via prepared statements with chunked
+   bind. Don't materialize the full BLOB on the WASM heap.
+
+4. **Vendor abstraction is sacred.** All storage access goes through
+   `temper-store-turso::TursoEventStore`. Never import `libsql-*`
+   crates directly in temper-git code — that would couple us to
+   self-hosted and break the Turso-Cloud-swap contract.
+
+5. **HMAC credentials are never logged.** `AWS_ACCESS_KEY_ID` and
+   `AWS_SECRET_ACCESS_KEY` (the GCS interop credentials) pass through
+   env only. Never emit them in trace, span tags, or error messages.
+
 ### No-goes
 
 - **Do not optimize for "our internal use case" over compatibility.** If
@@ -143,7 +172,14 @@ integrity).
   Caching is Temper's job (it already caches entity state). A second
   layer means cache invalidation becomes our problem and introduces
   divergence risk.
+- **Do not introduce a second blob-storage tier.** ADR-0004 explicitly
+  rejected spill-to-separate-store. BLOB content lives in the SQLite
+  row. If you believe this is wrong for a specific case, write a new
+  ADR superseding ADR-0004 — don't patch around it.
 - **Do not support git-annex, git-lfs, or sub-modules in v1.** Submodules
   are in scope for v2 (just another blob-like pointer).
 - **Do not emit pack-v1.** Not even as fallback. Modern git clients all
   speak v2.
+- **Do not couple to the self-hosted libsql-server deployment in
+  application code.** Everything goes through the libSQL wire protocol.
+  Swap to Turso Cloud must remain a single-Secret change.

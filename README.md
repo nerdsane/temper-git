@@ -23,9 +23,10 @@ Design phase. RFC-0001 out for review.
 2. [docs/adr/0001-temper-git-mission.md](docs/adr/0001-temper-git-mission.md)
 3. [docs/adr/0002-temper-native-scm.md](docs/adr/0002-temper-native-scm.md)
 4. [docs/adr/0003-byte-exact-git-compat.md](docs/adr/0003-byte-exact-git-compat.md)
-5. [docs/rfc/0001-temper-git-v1-architecture.md](docs/rfc/0001-temper-git-v1-architecture.md)
-6. [CLAUDE.md](CLAUDE.md) — if you're an agent working on this repo
-7. [CODING_GUIDELINES.md](CODING_GUIDELINES.md) — TigerStyle + temper-git additions
+5. [docs/adr/0004-per-repo-libsql-gcs.md](docs/adr/0004-per-repo-libsql-gcs.md)
+6. [docs/rfc/0001-temper-git-v1-architecture.md](docs/rfc/0001-temper-git-v1-architecture.md)
+7. [CLAUDE.md](CLAUDE.md) — if you're an agent working on this repo
+8. [CODING_GUIDELINES.md](CODING_GUIDELINES.md) — TigerStyle + temper-git additions
 
 ## Repo layout
 

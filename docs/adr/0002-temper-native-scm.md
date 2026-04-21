@@ -98,7 +98,12 @@ its response back.
 ### Separation of concerns
 
 - **IOA entities own state.** They are the durable, canonical
-  representation. Nothing else is.
+  representation. Nothing else is. Physical storage is a per-repo
+  libSQL database with WAL frames shipped to GCS; see
+  [ADR-0004](0004-per-repo-libsql-gcs.md). The separation contract
+  holds regardless of substrate — if we later swap libSQL for Turso
+  Cloud (same wire protocol, different vendor), the entity model and
+  WASM integrations are unchanged.
 - **WASM integrations own protocol.** They are stateless (aside from
   in-request working memory). They translate between
   smart-HTTP/REST/GraphQL and OData actions.
@@ -196,6 +201,7 @@ verification, everything is symmetric.
 
 - [ADR-0001](0001-temper-git-mission.md) — mission
 - [ADR-0003](0003-byte-exact-git-compat.md) — compat gate
+- [ADR-0004](0004-per-repo-libsql-gcs.md) — per-repo libSQL storage
 - [RFC-0001](../rfc/0001-temper-git-v1-architecture.md) — v1 design
 - [temper/CLAUDE.md](../../temper/CLAUDE.md) — kernel discipline
 - Temper ADR-0002 (dark-helix): "Temper-only control plane"
