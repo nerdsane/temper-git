@@ -1,0 +1,30 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# WASM build artifacts
+wasm-modules/*/target/
+
+# Temper submodule build artifacts (when populated)
+/temper/target/
+
+# Editor / OS
+.DS_Store
+._*
+*.swp
+.idea/
+.vscode/
+
+# Secrets — nothing committed
+*.env
+*.env.local
+.secrets/
+
+# Local test fixtures (recorded github.com responses get checked in under
+# tests/fixtures/; ad-hoc scratch goes here)
+.scratch/
+
+# Tarballs / build outputs
+*.tgz
+*.tar.gz
