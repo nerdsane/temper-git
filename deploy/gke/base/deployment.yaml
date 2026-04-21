@@ -1,0 +1,87 @@
+# temper-git Deployment.
+#
+# Single-replica for the same reason dark-helix pins temper to 1
+# replica: the WASM integration registry is per-pod and the
+# cross-replica OData read consistency gap (O-2026-04-19-0002) is
+# still open upstream. Promoting to 2+ replicas waits on the upstream
+# fix.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temper-git
+  namespace: temper-git
+  labels:
+    app: temper-git
+spec:
+  replicas: 1
+  strategy:
+    # RollingUpdate with maxSurge=0 because only one pod can own the
+    # PVC at a time (ReadWriteOnce). Recreate-style behaviour, small
+    # service interruption during deploys is acceptable for v0.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: temper-git
+  template:
+    metadata:
+      labels:
+        app: temper-git
+      annotations:
+        ad.datadoghq.com/temper-git.logs: '[{"source":"temper","service":"temper-git"}]'
+    spec:
+      serviceAccountName: temper-git-ksa
+      containers:
+        - name: temper-git
+          image: us-central1-docker.pkg.dev/darkhelix-sandbox/darkhelix/temper-git:v0.1.0-phase1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: "info,temper=info,temper_platform=info"
+            # Auto-install the bundle baked into the image at
+            # /app/os-apps/temper-git/ (see deploy/Dockerfile).
+            - name: TEMPER_OS_APPS_DIR
+              value: "/app/os-apps"
+            - name: TEMPER_AUTO_INSTALL_APPS
+              value: "true"
+            # Local libSQL file on the PVC. When ADR-0004 lands,
+            # swap this for the per-repo-router URL and add
+            # bottomless-s3 env vars pointing at GCS.
+            - name: TURSO_URL
+              value: "file:/var/lib/temper-git/agents.db"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/temper-git
+          readinessProbe:
+            httpGet:
+              path: /tdata
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /tdata
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: temper-git-data

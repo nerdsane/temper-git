@@ -1,0 +1,27 @@
+# Files to exclude from `gcloud builds submit` source uploads.
+#
+# Cloud Build untars the source and then Dockerfile COPYs pick pieces
+# out of it. We keep the upload small by stripping Rust build
+# artifacts and IDE/OS noise, while deliberately including the temper
+# submodule's working tree (the Dockerfile needs it to build the
+# temper binary with the ADR-0056 branch checked out).
+
+# Rust / Cargo
+**/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Git internals — submodule working trees DO get uploaded (that's the
+# whole point) but .git dirs are noise.
+.git/
+**/.git/

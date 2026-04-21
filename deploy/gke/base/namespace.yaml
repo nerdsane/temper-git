@@ -1,0 +1,13 @@
+# temper-git lives in its own Kubernetes namespace so dark-helix
+# (the factory) can depend on it without being able to mutate its
+# control plane. Cross-namespace RBAC is absent by default; the only
+# connection dark-helix gets is the ClusterIP Service endpoint.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: temper-git
+  labels:
+    project: temper-git
+    tier: scm
+  annotations:
+    ad.datadoghq.com/tags: '{"env":"sandbox","service":"temper-git"}'
