@@ -1,0 +1,57 @@
+# ReviewComment — one line-level comment on a PR review.
+#
+# Path + Line identify the location; CommitSha is the commit the
+# reviewer was looking at when they commented (a later force-push can
+# orphan the comment, marked via Resolved state rather than deletion).
+#
+# State: Open → Resolved (terminal, kept for audit).
+
+[automaton]
+name = "ReviewComment"
+states = ["Open", "Resolved"]
+initial = "Open"
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Open"]
+to = "Open"
+params = ["ReviewId", "AuthorPrincipal", "Path", "Line", "CommitSha", "Body"]
+
+[[action]]
+name = "Resolve"
+kind = "input"
+from = ["Open"]
+to = "Resolved"
+params = ["ResolvedBy"]
+
+# --- Output events ---
+
+[[action]]
+name = "ReviewCommentPostedEvent"
+kind = "output"
+
+# --- Safety invariants ---
+
+[[invariant]]
+name = "ResolvedIsFinal"
+when = ["Resolved"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "CommitShaIsSha1Hex"
+require = { all_of = [
+  { field = "CommitSha", matches = "^[0-9a-f]{40}$" },
+]}
+message = "ReviewComment.CommitSha must be 40 lowercase hex chars"
+
+[[field_invariant]]
+name = "LineNonNegative"
+require = { all_of = [
+  { field = "Line", gte = 1 },
+]}
+message = "ReviewComment.Line must be >= 1"

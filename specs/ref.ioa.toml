@@ -1,0 +1,113 @@
+# Ref — a named pointer at a commit (git branch or tag).
+#
+# `Name` is the full ref name, e.g. `refs/heads/main` or
+# `refs/tags/v1.0.0`. Branches use `refs/heads/*`, lightweight and
+# annotated tags use `refs/tags/*` (annotated tags have an
+# accompanying Tag row; the ref just points at the tag object).
+#
+# State machine: Active → Deleted (terminal, retained for audit;
+# filter out on list operations).
+#
+# `Update` uses optimistic compare-and-set: callers must provide
+# `PreviousCommitSha` (the ref's current target); a concurrent push
+# that races produces `ng <ref> <reason>` at the wire-protocol level.
+# `ForceUpdate` skips the precondition and requires `force:true`
+# scope on the GitToken (Cedar-enforced).
+
+[automaton]
+name = "Ref"
+states = ["Active", "Deleted"]
+initial = "Active"
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["RepositoryId", "Name", "TargetCommitSha", "Kind"]
+hint = "Create a new ref. Must reference an existing Commit on the same RepositoryId (enforced by cross-invariant)."
+
+[[action]]
+name = "Update"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["PreviousCommitSha", "NewCommitSha"]
+hint = "Compare-and-set advance. Requires PreviousCommitSha to match the current TargetCommitSha; fails otherwise."
+
+[[action]]
+name = "ForceUpdate"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["NewCommitSha"]
+hint = "Skip the compare-and-set precondition. Requires force scope on the caller's GitToken."
+
+[[action]]
+name = "Delete"
+kind = "input"
+from = ["Active"]
+to = "Deleted"
+hint = "Delete the ref. Terminal state; kept for audit."
+
+# --- Output events ---
+
+[[action]]
+name = "RefUpdatedEvent"
+kind = "output"
+hint = "Emitted on Update or ForceUpdate."
+
+[[action]]
+name = "RefDeletedEvent"
+kind = "output"
+hint = "Emitted on Delete."
+
+# --- Safety invariants ---
+
+[[invariant]]
+name = "DeletedIsFinal"
+when = ["Deleted"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "NameIsValidRefPath"
+require = { any_of = [
+  { field = "Name", matches = "^refs/heads/[A-Za-z0-9_/.-]+$" },
+  { field = "Name", matches = "^refs/tags/[A-Za-z0-9_/.-]+$" },
+]}
+message = "Ref.Name must be refs/heads/<branch> or refs/tags/<tag>"
+
+[[field_invariant]]
+name = "TargetCommitShaIsSha1Hex"
+require = { all_of = [
+  { field = "TargetCommitSha", matches = "^[0-9a-f]{40}$" },
+]}
+message = "Ref.TargetCommitSha must be 40 lowercase hex chars"
+
+[[field_invariant]]
+name = "KindIsKnown"
+require = { any_of = [
+  { field = "Kind", equals = "branch" },
+  { field = "Kind", equals = "tag" },
+]}
+message = "Ref.Kind must be branch or tag"
+
+[[field_invariant]]
+name = "BranchNameMatchesPath"
+when = { field = "Kind", equals = "branch" }
+require = { all_of = [
+  { field = "Name", matches = "^refs/heads/" },
+]}
+message = "Ref.Kind=branch requires Name to start with refs/heads/"
+
+[[field_invariant]]
+name = "TagNameMatchesPath"
+when = { field = "Kind", equals = "tag" }
+require = { all_of = [
+  { field = "Name", matches = "^refs/tags/" },
+]}
+message = "Ref.Kind=tag requires Name to start with refs/tags/"

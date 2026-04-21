@@ -1,0 +1,175 @@
+# PullRequest — a proposal to merge SourceRef into TargetRef.
+#
+# State machine (mirrors GitHub + adds approval states):
+#
+#   Draft ─────▶ Open ────────▶ UnderReview ────▶ Approved ─▶ Merged
+#                 │    (RequestReview)   │  (Approve)        (Merge)
+#                 │                      │
+#                 │                      └────▶ ChangesRequested
+#                 │                               (RequestChanges)
+#                 │                               │
+#                 │                               └─(RequestReview)─▶ UnderReview
+#                 │
+#                 └─(Close)──▶ Closed (terminal; also reachable from all open states)
+#
+# `Number` is a monotonic per-repo integer — GitHub convention (#n).
+# Computed by the `scm_assign_pr_number` WASM integration on Open.
+#
+# `HeadCommitSha` advances as new commits are pushed to SourceRef;
+# `BaseCommitSha` is the merge base at open time (may advance if
+# rebase action is implemented in Phase 2).
+
+[automaton]
+name = "PullRequest"
+states = ["Draft", "Open", "UnderReview", "Approved", "ChangesRequested", "Merged", "Closed"]
+initial = "Draft"
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Draft"]
+to = "Draft"
+params = ["RepositoryId", "SourceRef", "TargetRef", "Title", "Body", "OpenedBy", "ClientRequestId"]
+hint = "Draft a PR. Must validate that SourceRef and TargetRef both exist on the repo (cross-invariant)."
+
+[[action]]
+name = "Open"
+kind = "input"
+from = ["Draft"]
+to = "Open"
+hint = "Transition from Draft to Open. Triggers scm_assign_pr_number to compute the per-repo Number."
+effect = [{ type = "trigger", name = "scm_assign_pr_number" }]
+
+[[action]]
+name = "UpdateHead"
+kind = "input"
+from = ["Open", "UnderReview", "ChangesRequested", "Approved"]
+to = "Open"
+params = ["NewHeadCommitSha"]
+hint = "Emitted by receive-pack when a push lands on SourceRef. Resets state to Open (stale review flag is on Approval)."
+
+[[action]]
+name = "RequestReview"
+kind = "input"
+from = ["Open", "ChangesRequested"]
+to = "UnderReview"
+params = ["ReviewerPrincipal"]
+
+[[action]]
+name = "Approve"
+kind = "input"
+from = ["UnderReview", "ChangesRequested"]
+to = "Approved"
+params = ["ReviewerPrincipal", "Body"]
+
+[[action]]
+name = "RequestChanges"
+kind = "input"
+from = ["UnderReview", "Approved"]
+to = "ChangesRequested"
+params = ["ReviewerPrincipal", "Body"]
+
+[[action]]
+name = "DismissReview"
+kind = "input"
+from = ["Approved", "ChangesRequested"]
+to = "UnderReview"
+params = ["ReviewId", "Reason"]
+
+[[action]]
+name = "Merge"
+kind = "input"
+from = ["Approved"]
+to = "Merged"
+params = ["Strategy", "Message", "ClientRequestId"]
+hint = "Apply SourceRef onto TargetRef. Strategy: merge | squash | rebase. Writes MergedCommit and advances TargetRef atomically."
+effect = [{ type = "trigger", name = "scm_merge_pr" }]
+
+[[action]]
+name = "Close"
+kind = "input"
+from = ["Draft", "Open", "UnderReview", "Approved", "ChangesRequested"]
+to = "Closed"
+params = ["Reason"]
+hint = "Close without merging."
+
+# --- Output events ---
+
+[[action]]
+name = "PullRequestOpenedEvent"
+kind = "output"
+
+[[action]]
+name = "PullRequestMergedEvent"
+kind = "output"
+
+[[action]]
+name = "PullRequestClosedEvent"
+kind = "output"
+
+# --- Safety invariants ---
+
+[[invariant]]
+name = "MergedIsFinal"
+when = ["Merged"]
+assert = "no_further_transitions"
+
+[[invariant]]
+name = "ClosedIsFinal"
+when = ["Closed"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "SourceRefFormat"
+require = { all_of = [
+  { field = "SourceRef", matches = "^refs/heads/[A-Za-z0-9_/.-]+$" },
+]}
+message = "PullRequest.SourceRef must be refs/heads/<branch>"
+
+[[field_invariant]]
+name = "TargetRefFormat"
+require = { all_of = [
+  { field = "TargetRef", matches = "^refs/heads/[A-Za-z0-9_/.-]+$" },
+]}
+message = "PullRequest.TargetRef must be refs/heads/<branch>"
+
+[[field_invariant]]
+name = "MergedRequiresMergedCommitSha"
+when = { field = "State", equals = "Merged" }
+require = { all_of = [
+  { not = { field = "MergedCommitSha", absent = true } },
+  { field = "MergedCommitSha", matches = "^[0-9a-f]{40}$" },
+]}
+message = "Merged PR must have MergedCommitSha populated with a 40-char hex"
+
+[[field_invariant]]
+name = "MergedRequiresMergedBy"
+when = { field = "State", equals = "Merged" }
+require = { all_of = [
+  { not = { field = "MergedBy", absent = true } },
+]}
+message = "Merged PR must have MergedBy populated"
+
+# --- Integrations ---
+
+[[integration]]
+name = "scm_assign_pr_number"
+trigger = "scm_assign_pr_number"
+type = "wasm"
+module = "scm_assign_pr_number"
+
+[integration.config]
+timeout_secs = 5
+
+[[integration]]
+name = "scm_merge_pr"
+trigger = "scm_merge_pr"
+type = "wasm"
+module = "scm_merge_pr"
+
+[integration.config]
+timeout_secs = 120

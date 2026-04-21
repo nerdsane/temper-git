@@ -1,0 +1,106 @@
+# HttpEndpoint — register a WASM integration as a route handler.
+#
+# ## Status — KERNEL DELTA
+#
+# This entity is a new Temper-kernel feature, not an app-level concept.
+# It needs to land in upstream Temper (github.com/nerdsane/temper)
+# before temper-git can actually register routes. See
+# RFC-0001 §"Kernel deltas" (K-1).
+#
+# In the temper-git os-app bundle this file is aspirational — it
+# documents the contract we need. When the upstream kernel patch lands
+# (owning the router additions + the Cedar surface for it), this file
+# moves up to the kernel's `temper-platform/src/specs/` and this app
+# bundle uses it via the standard OS-app merge.
+#
+# ## Contract
+#
+# Registered HttpEndpoints extend the router's match set. On request,
+# the kernel does longest-prefix match against registered endpoints,
+# extracts path params, resolves auth (if RequiresAuth), and
+# dispatches to the bound WASM integration with:
+#   * Method, Path, Headers, streamed Body
+#   * Matched path parameters as ctx.params
+#   * Resolved Principal from auth
+#
+# The WASM integration streams its response back through a new
+# `http_call_streaming` SDK API (kernel delta K-2 in RFC-0001).
+#
+# ## State machine
+#
+# Active → Paused → Active → Deleted. Same shape as Webhook.
+
+[automaton]
+name = "HttpEndpoint"
+states = ["Active", "Paused", "Deleted"]
+initial = "Active"
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["PathPrefix", "Methods", "IntegrationModule", "RequiresAuth", "TimeoutSecs"]
+hint = "Register a new HTTP path prefix. Kernel updates its router match-set."
+
+[[action]]
+name = "Pause"
+kind = "input"
+from = ["Active"]
+to = "Paused"
+hint = "Temporarily stop accepting requests on this prefix; incoming requests get 503."
+
+[[action]]
+name = "Resume"
+kind = "input"
+from = ["Paused"]
+to = "Active"
+
+[[action]]
+name = "Delete"
+kind = "input"
+from = ["Active", "Paused"]
+to = "Deleted"
+
+# --- Output events ---
+
+[[action]]
+name = "HttpEndpointRegisteredEvent"
+kind = "output"
+
+[[action]]
+name = "HttpEndpointDeletedEvent"
+kind = "output"
+
+# --- Safety invariants ---
+
+[[invariant]]
+name = "DeletedIsFinal"
+when = ["Deleted"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "PathPrefixNonEmpty"
+require = { all_of = [
+  { field = "PathPrefix", matches = "^/.+" },
+]}
+message = "HttpEndpoint.PathPrefix must start with '/'"
+
+[[field_invariant]]
+name = "MethodsNonEmpty"
+require = { all_of = [
+  { field = "Methods", matches = ".+" },
+]}
+message = "HttpEndpoint.Methods must be a non-empty comma-separated list"
+
+[[field_invariant]]
+name = "TimeoutReasonable"
+require = { all_of = [
+  { field = "TimeoutSecs", gte = 1 },
+  { field = "TimeoutSecs", lte = 600 },
+]}
+message = "HttpEndpoint.TimeoutSecs must be 1..600"

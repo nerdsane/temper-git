@@ -1,0 +1,217 @@
+# temper-git — Temper-native, byte-exact, GitHub-compatible SCM.
+#
+# This manifest declares temper-git as a Temper OS-app bundle. The
+# Temper kernel consumes this file during tenant boot, loads the
+# IOA specs + Cedar policies + WASM integrations, and wires the
+# declared HttpEndpoints into its router.
+#
+# See:
+#   * ADR-0001 — why temper-git exists as a separate product
+#   * ADR-0002 — Temper-native SCM (state is IOA, protocol is WASM)
+#   * ADR-0003 — byte-exact git compatibility gate
+#   * ADR-0004 — per-repo libSQL backed by GCS
+#   * RFC-0001 — v1 architecture
+name = "temper-git"
+description = "Temper-native, byte-exact, GitHub-compatible SCM with smart-HTTP git + REST v3 + GraphQL v4 surfaces."
+version = "0.1.0"
+
+# --- Spec directories --------------------------------------------------
+#
+# Matches the layout other Temper OS-apps use: IOA TOMLs + CSDL live
+# under specs/; Cedar policies live under policies/. Paths are
+# relative to this file.
+
+specs_dir    = "specs"
+policies_dir = "policies"
+csdl_file    = "specs/model.csdl.xml"
+
+# --- IOA entities ------------------------------------------------------
+#
+# 13 entity specs. Order is documentation-only; the IOA registry is
+# keyed on `automaton.name`.
+
+[[entity]]
+name = "Blob"
+spec = "specs/blob.ioa.toml"
+policy = "policies/objects.cedar"
+
+[[entity]]
+name = "Tree"
+spec = "specs/tree.ioa.toml"
+policy = "policies/objects.cedar"
+
+[[entity]]
+name = "TreeEntry"
+spec = "specs/tree_entry.ioa.toml"
+policy = "policies/objects.cedar"
+
+[[entity]]
+name = "Commit"
+spec = "specs/commit.ioa.toml"
+policy = "policies/objects.cedar"
+
+[[entity]]
+name = "Tag"
+spec = "specs/tag.ioa.toml"
+policy = "policies/objects.cedar"
+
+[[entity]]
+name = "Repository"
+spec = "specs/repository.ioa.toml"
+policy = "policies/repository.cedar"
+
+[[entity]]
+name = "Ref"
+spec = "specs/ref.ioa.toml"
+policy = "policies/ref.cedar"
+
+[[entity]]
+name = "PullRequest"
+spec = "specs/pull_request.ioa.toml"
+policy = "policies/pull_request.cedar"
+
+[[entity]]
+name = "Review"
+spec = "specs/review.ioa.toml"
+policy = "policies/review.cedar"
+
+[[entity]]
+name = "ReviewComment"
+spec = "specs/review_comment.ioa.toml"
+policy = "policies/review_comment.cedar"
+
+[[entity]]
+name = "GitToken"
+spec = "specs/git_token.ioa.toml"
+policy = "policies/git_token.cedar"
+
+[[entity]]
+name = "Webhook"
+spec = "specs/webhook.ioa.toml"
+policy = "policies/webhook.cedar"
+
+[[entity]]
+name = "HttpEndpoint"
+spec = "specs/http_endpoint.ioa.toml"
+policy = "policies/http_endpoint.cedar"
+
+# --- WASM integrations -------------------------------------------------
+#
+# Declared-only in Phase 1 specs landing. The modules themselves land
+# under wasm-modules/ per RFC-0001 phased delivery and are bound here
+# once built.
+
+[[integration]]
+name = "git_upload_pack"
+module = "wasm-modules/git_upload_pack.wasm"
+description = "Serve smart-HTTP fetch/clone (POST /<repo>/git-upload-pack, GET info/refs)."
+
+[[integration]]
+name = "git_receive_pack"
+module = "wasm-modules/git_receive_pack.wasm"
+description = "Accept smart-HTTP push (POST /<repo>/git-receive-pack). Parses pack, writes Blob/Tree/Commit/Tag rows, applies Ref updates."
+
+[[integration]]
+name = "repository_provision"
+module = "wasm-modules/repository_provision.wasm"
+description = "Allocate per-repo libSQL DB, seed schema, fire Repository.MarkProvisioned."
+
+[[integration]]
+name = "scm_write_file"
+module = "wasm-modules/scm_write_file.wasm"
+description = "Repository.WriteFile / BatchWriteFiles — create Blob/Tree/Commit rows and fast-forward a Ref."
+
+[[integration]]
+name = "scm_merge_pr"
+module = "wasm-modules/scm_merge_pr.wasm"
+description = "PullRequest.Merge — create merge commit (or squash/rebase), fast-forward target Ref, flip PR state to Merged."
+
+[[integration]]
+name = "github_rest_contents"
+module = "wasm-modules/github_rest_contents.wasm"
+description = "GitHub REST v3 /repos/{o}/{r}/contents/{path} — GET returns Blob+TreeEntry view, PUT calls Repository.WriteFile."
+
+[[integration]]
+name = "github_rest_refs"
+module = "wasm-modules/github_rest_refs.wasm"
+description = "GitHub REST v3 /repos/{o}/{r}/git/refs — CRUD on Ref entities."
+
+[[integration]]
+name = "github_rest_pulls"
+module = "wasm-modules/github_rest_pulls.wasm"
+description = "GitHub REST v3 /repos/{o}/{r}/pulls — CRUD + Merge on PullRequest entities."
+
+[[integration]]
+name = "github_rest_repos"
+module = "wasm-modules/github_rest_repos.wasm"
+description = "GitHub REST v3 /user/repos, /orgs/{o}/repos, /repos/{o}/{r} — Repository CRUD."
+
+# --- HTTP endpoint wiring ---------------------------------------------
+#
+# These are the declared route registrations. They're applied by the
+# kernel's HttpEndpoint reconciler (kernel delta K-1, see RFC-0001) at
+# tenant boot. Until K-1 lands upstream these entries are inert
+# documentation.
+
+[[http_endpoint]]
+path_prefix = "/{owner}/{repo}.git/info/refs"
+methods = ["GET"]
+integration = "git_upload_pack"
+requires_auth = true
+timeout_secs = 60
+
+[[http_endpoint]]
+path_prefix = "/{owner}/{repo}.git/git-upload-pack"
+methods = ["POST"]
+integration = "git_upload_pack"
+requires_auth = true
+timeout_secs = 600
+
+[[http_endpoint]]
+path_prefix = "/{owner}/{repo}.git/git-receive-pack"
+methods = ["POST"]
+integration = "git_receive_pack"
+requires_auth = true
+timeout_secs = 600
+
+[[http_endpoint]]
+path_prefix = "/api/v3/repos/{owner}/{repo}/contents"
+methods = ["GET", "PUT", "DELETE"]
+integration = "github_rest_contents"
+requires_auth = true
+timeout_secs = 60
+
+[[http_endpoint]]
+path_prefix = "/api/v3/repos/{owner}/{repo}/git/refs"
+methods = ["GET", "POST", "PATCH", "DELETE"]
+integration = "github_rest_refs"
+requires_auth = true
+timeout_secs = 30
+
+[[http_endpoint]]
+path_prefix = "/api/v3/repos/{owner}/{repo}/pulls"
+methods = ["GET", "POST", "PATCH"]
+integration = "github_rest_pulls"
+requires_auth = true
+timeout_secs = 60
+
+[[http_endpoint]]
+path_prefix = "/api/v3/repos/{owner}/{repo}/pulls/{number}/merge"
+methods = ["PUT"]
+integration = "github_rest_pulls"
+requires_auth = true
+timeout_secs = 120
+
+[[http_endpoint]]
+path_prefix = "/api/v3/user/repos"
+methods = ["GET", "POST"]
+integration = "github_rest_repos"
+requires_auth = true
+timeout_secs = 30
+
+[[http_endpoint]]
+path_prefix = "/api/v3/repos/{owner}/{repo}"
+methods = ["GET", "PATCH", "DELETE"]
+integration = "github_rest_repos"
+requires_auth = true
+timeout_secs = 30

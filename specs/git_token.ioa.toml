@@ -1,0 +1,72 @@
+# GitToken — a bearer credential mapped to a Principal with scopes.
+#
+# The secret itself is never stored — only its SHA-256. Authentication
+# computes SHA-256 of the presented bearer and looks up by HashedSecret.
+# KeyPrefix (first 8 chars of the secret) is stored in cleartext so
+# logs can identify the token in use without leaking the full secret.
+#
+# Scopes mirror GitHub's PAT fine-grained scope list:
+#   repo:read, repo:write, pr:write, pr:merge, admin:repos,
+#   admin:tokens, force
+# New scopes require an ADR describing what they gate.
+#
+# State: Active → Revoked (terminal).
+
+[automaton]
+name = "GitToken"
+states = ["Active", "Revoked"]
+initial = "Active"
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["PrincipalId", "HashedSecret", "KeyPrefix", "Scopes", "ExpiresAt"]
+hint = "Create a new token. Caller is responsible for generating the secret + SHA-256ing it; the secret is returned to the caller once and never stored."
+
+[[action]]
+name = "MarkUsed"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["LastUsedAt"]
+hint = "Update LastUsedAt. Fired on every successful auth check."
+
+[[action]]
+name = "Revoke"
+kind = "input"
+from = ["Active"]
+to = "Revoked"
+params = ["RevokedBy", "Reason"]
+
+# --- Output events ---
+
+[[action]]
+name = "GitTokenRevokedEvent"
+kind = "output"
+
+# --- Safety invariants ---
+
+[[invariant]]
+name = "RevokedIsFinal"
+when = ["Revoked"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "HashedSecretIsSha256Hex"
+require = { all_of = [
+  { field = "HashedSecret", matches = "^[0-9a-f]{64}$" },
+]}
+message = "GitToken.HashedSecret must be 64 lowercase hex chars (SHA-256)"
+
+[[field_invariant]]
+name = "KeyPrefixShape"
+require = { all_of = [
+  { field = "KeyPrefix", matches = "^[A-Za-z0-9_-]{4,16}$" },
+]}
+message = "GitToken.KeyPrefix must be 4-16 alphanumeric chars (first bytes of the secret)"

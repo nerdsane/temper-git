@@ -1,0 +1,59 @@
+# Review — a single reviewer's decision on a PullRequest.
+#
+# Mirrors GitHub's review model: a Review has a Decision (one of
+# commented | approved | changes_requested), an optional Body, and
+# a set of line-level ReviewComment children.
+#
+# State machine: Submitted → Dismissed (terminal). A dismissed review
+# no longer counts toward approval math; it's kept for audit.
+
+[automaton]
+name = "Review"
+states = ["Submitted", "Dismissed"]
+initial = "Submitted"
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Submitted"]
+to = "Submitted"
+params = ["PullRequestId", "ReviewerPrincipal", "Decision", "Body"]
+hint = "Submit a review. Decision: commented | approved | changes_requested."
+
+[[action]]
+name = "Dismiss"
+kind = "input"
+from = ["Submitted"]
+to = "Dismissed"
+params = ["Reason"]
+hint = "Dismiss the review. Kept for audit but no longer counts."
+
+# --- Output events ---
+
+[[action]]
+name = "ReviewSubmittedEvent"
+kind = "output"
+
+[[action]]
+name = "ReviewDismissedEvent"
+kind = "output"
+
+# --- Safety invariants ---
+
+[[invariant]]
+name = "DismissedIsFinal"
+when = ["Dismissed"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "DecisionKnown"
+require = { any_of = [
+  { field = "Decision", equals = "commented" },
+  { field = "Decision", equals = "approved" },
+  { field = "Decision", equals = "changes_requested" },
+]}
+message = "Review.Decision must be commented | approved | changes_requested"

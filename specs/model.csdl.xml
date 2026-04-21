@@ -1,0 +1,352 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  temper-git CSDL schema.
+
+  OData data model for the temper-git SCM. Every IOA spec in this
+  directory has a matching EntityType here. Entity sets are exposed
+  under `/tdata/{<PluralName>}` per standard Temper OData routing.
+
+  Id shape:
+    * Blob, Tree, Commit, Tag — SHA-1 hex (40 lowercase hex chars).
+    * TreeEntry, Repository, Ref, PullRequest, Review, ReviewComment,
+      GitToken, Webhook, HttpEndpoint — UUIDv7 strings with an entity
+      prefix (rp-, rf-, pr-, rv-, rc-, gt-, wh-, he-).
+
+  Temper.Git namespace keeps us distinct from Temper.System and
+  Temper.Crucible upstream.
+-->
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+
+    <!-- Shared Temper vocabulary — same as every Temper app. -->
+    <Schema Namespace="Temper.Vocab" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <Term Name="StateMachine.States"           Type="Collection(Edm.String)" AppliesTo="EntityType"/>
+      <Term Name="StateMachine.InitialState"     Type="Edm.String"             AppliesTo="EntityType"/>
+      <Term Name="StateMachine.ValidFromStates"  Type="Collection(Edm.String)" AppliesTo="Action"/>
+      <Term Name="StateMachine.TargetState"      Type="Edm.String"             AppliesTo="Action"/>
+      <Term Name="Agent.Hint"                    Type="Edm.String"             AppliesTo="Action Function EntityType"/>
+      <Term Name="ShardKey"                      Type="Edm.String"             AppliesTo="EntityType"/>
+      <Term Name="AuthZ.CedarPolicy"             Type="Edm.String"             AppliesTo="EntityType Action Function"/>
+    </Schema>
+
+    <!-- =================================================================== -->
+    <!-- temper-git SCM entities                                             -->
+    <!-- =================================================================== -->
+    <Schema Namespace="Temper.Git" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <!-- ============ Blob ============ -->
+      <EntityType Name="Blob">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"             Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId"   Type="Edm.String" Nullable="false"/>
+        <Property Name="Size"           Type="Edm.Int64"  Nullable="false"/>
+        <!-- SQLite BLOB column in the repo's libSQL DB (ADR-0004). -->
+        <Property Name="Content"        Type="Edm.Binary" Nullable="false"/>
+        <Property Name="CanonicalBytes" Type="Edm.Binary" Nullable="false"/>
+        <Property Name="Status"         Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt"      Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection><String>Durable</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Durable"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="RepositoryId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/objects.cedar"/>
+      </EntityType>
+
+      <!-- ============ Tree ============ -->
+      <EntityType Name="Tree">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"             Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId"   Type="Edm.String" Nullable="false"/>
+        <Property Name="CanonicalBytes" Type="Edm.Binary" Nullable="false"/>
+        <Property Name="Status"         Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt"      Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Entries" Type="Collection(Temper.Git.TreeEntry)"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection><String>Durable</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Durable"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="RepositoryId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/objects.cedar"/>
+      </EntityType>
+
+      <!-- ============ TreeEntry ============ -->
+      <EntityType Name="TreeEntry">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"           Type="Edm.String" Nullable="false"/>
+        <Property Name="TreeId"       Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId" Type="Edm.String" Nullable="false"/>
+        <Property Name="Path"         Type="Edm.String" Nullable="false"/>
+        <Property Name="Mode"         Type="Edm.String" Nullable="false"/>
+        <Property Name="ObjectSha"    Type="Edm.String" Nullable="false"/>
+        <Property Name="Kind"         Type="Edm.String" Nullable="false"/>
+        <Property Name="Status"       Type="Edm.String" Nullable="false"/>
+        <NavigationProperty Name="Tree" Type="Temper.Git.Tree" Nullable="false">
+          <ReferentialConstraint Property="TreeId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection><String>Durable</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Durable"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="RepositoryId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/objects.cedar"/>
+      </EntityType>
+
+      <!-- ============ Commit ============ -->
+      <EntityType Name="Commit">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"             Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId"   Type="Edm.String" Nullable="false"/>
+        <Property Name="TreeSha"        Type="Edm.String" Nullable="false"/>
+        <Property Name="ParentShas"     Type="Edm.String" Nullable="true"/>
+        <Property Name="Author"         Type="Edm.String" Nullable="false"/>
+        <Property Name="Committer"      Type="Edm.String" Nullable="false"/>
+        <Property Name="Message"        Type="Edm.String" Nullable="false"/>
+        <Property Name="PgpSignature"   Type="Edm.String"/>
+        <Property Name="CanonicalBytes" Type="Edm.Binary" Nullable="false"/>
+        <Property Name="Status"         Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt"      Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection><String>Durable</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Durable"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="RepositoryId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/objects.cedar"/>
+      </EntityType>
+
+      <!-- ============ Tag (annotated) ============ -->
+      <EntityType Name="Tag">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"             Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId"   Type="Edm.String" Nullable="false"/>
+        <Property Name="TargetSha"      Type="Edm.String" Nullable="false"/>
+        <Property Name="TargetType"     Type="Edm.String" Nullable="false"/>
+        <Property Name="TagName"        Type="Edm.String" Nullable="false"/>
+        <Property Name="Tagger"         Type="Edm.String" Nullable="false"/>
+        <Property Name="Message"        Type="Edm.String" Nullable="false"/>
+        <Property Name="PgpSignature"   Type="Edm.String"/>
+        <Property Name="CanonicalBytes" Type="Edm.Binary" Nullable="false"/>
+        <Property Name="Status"         Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt"      Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection><String>Durable</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Durable"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="RepositoryId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/objects.cedar"/>
+      </EntityType>
+
+      <!-- ============ Repository ============ -->
+      <EntityType Name="Repository">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"              Type="Edm.String" Nullable="false"/>
+        <Property Name="OwnerAccountId"  Type="Edm.String" Nullable="false"/>
+        <Property Name="Name"            Type="Edm.String" Nullable="false"/>
+        <Property Name="Description"     Type="Edm.String"/>
+        <Property Name="DefaultBranch"   Type="Edm.String" Nullable="false"/>
+        <Property Name="Visibility"      Type="Edm.String" Nullable="false"/>
+        <Property Name="LibsqlDbName"    Type="Edm.String"/>
+        <Property Name="Status"          Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt"       Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt"       Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="ArchivedAt"      Type="Edm.DateTimeOffset"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Provisioning</String>
+            <String>Active</String>
+            <String>Archived</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Provisioning"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/repository.cedar"/>
+      </EntityType>
+
+      <!-- ============ Ref ============ -->
+      <EntityType Name="Ref">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"              Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId"    Type="Edm.String" Nullable="false"/>
+        <Property Name="Name"            Type="Edm.String" Nullable="false"/>
+        <Property Name="TargetCommitSha" Type="Edm.String" Nullable="false"/>
+        <Property Name="Kind"            Type="Edm.String" Nullable="false"/>
+        <Property Name="Status"          Type="Edm.String" Nullable="false"/>
+        <Property Name="UpdatedAt"       Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+            <String>Deleted</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="RepositoryId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/ref.cedar"/>
+      </EntityType>
+
+      <!-- ============ PullRequest ============ -->
+      <EntityType Name="PullRequest">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"                Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId"      Type="Edm.String" Nullable="false"/>
+        <Property Name="Number"            Type="Edm.Int64"  Nullable="false"/>
+        <Property Name="SourceRef"         Type="Edm.String" Nullable="false"/>
+        <Property Name="TargetRef"         Type="Edm.String" Nullable="false"/>
+        <Property Name="HeadCommitSha"     Type="Edm.String" Nullable="false"/>
+        <Property Name="BaseCommitSha"     Type="Edm.String" Nullable="false"/>
+        <Property Name="Title"             Type="Edm.String" Nullable="false"/>
+        <Property Name="Body"              Type="Edm.String"/>
+        <Property Name="OpenedBy"          Type="Edm.String" Nullable="false"/>
+        <Property Name="State"             Type="Edm.String" Nullable="false"/>
+        <Property Name="MergedCommitSha"   Type="Edm.String"/>
+        <Property Name="MergedBy"          Type="Edm.String"/>
+        <Property Name="OpenedAt"          Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt"         Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="MergedAt"          Type="Edm.DateTimeOffset"/>
+        <Property Name="ClosedAt"          Type="Edm.DateTimeOffset"/>
+        <NavigationProperty Name="Reviews" Type="Collection(Temper.Git.Review)"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Draft</String>
+            <String>Open</String>
+            <String>UnderReview</String>
+            <String>Approved</String>
+            <String>ChangesRequested</String>
+            <String>Merged</String>
+            <String>Closed</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Draft"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="RepositoryId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/pull_request.cedar"/>
+      </EntityType>
+
+      <!-- ============ Review ============ -->
+      <EntityType Name="Review">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"                 Type="Edm.String" Nullable="false"/>
+        <Property Name="PullRequestId"      Type="Edm.String" Nullable="false"/>
+        <Property Name="ReviewerPrincipal"  Type="Edm.String" Nullable="false"/>
+        <Property Name="Decision"           Type="Edm.String" Nullable="false"/>
+        <Property Name="Body"               Type="Edm.String"/>
+        <Property Name="Status"             Type="Edm.String" Nullable="false"/>
+        <Property Name="SubmittedAt"        Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Comments" Type="Collection(Temper.Git.ReviewComment)"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Submitted</String>
+            <String>Dismissed</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Submitted"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/review.cedar"/>
+      </EntityType>
+
+      <!-- ============ ReviewComment ============ -->
+      <EntityType Name="ReviewComment">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"              Type="Edm.String" Nullable="false"/>
+        <Property Name="ReviewId"        Type="Edm.String" Nullable="false"/>
+        <Property Name="AuthorPrincipal" Type="Edm.String" Nullable="false"/>
+        <Property Name="Path"            Type="Edm.String" Nullable="false"/>
+        <Property Name="Line"            Type="Edm.Int64"  Nullable="false"/>
+        <Property Name="CommitSha"       Type="Edm.String" Nullable="false"/>
+        <Property Name="Body"            Type="Edm.String" Nullable="false"/>
+        <Property Name="Status"          Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt"       Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Open</String>
+            <String>Resolved</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Open"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/review_comment.cedar"/>
+      </EntityType>
+
+      <!-- ============ GitToken ============ -->
+      <EntityType Name="GitToken">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"            Type="Edm.String" Nullable="false"/>
+        <Property Name="PrincipalId"   Type="Edm.String" Nullable="false"/>
+        <Property Name="HashedSecret"  Type="Edm.String" Nullable="false"/>
+        <Property Name="KeyPrefix"     Type="Edm.String" Nullable="false"/>
+        <Property Name="Scopes"        Type="Edm.String" Nullable="false"/>
+        <Property Name="Status"        Type="Edm.String" Nullable="false"/>
+        <Property Name="ExpiresAt"     Type="Edm.DateTimeOffset"/>
+        <Property Name="LastUsedAt"    Type="Edm.DateTimeOffset"/>
+        <Property Name="CreatedAt"     Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="RevokedAt"     Type="Edm.DateTimeOffset"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+            <String>Revoked</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/git_token.cedar"/>
+      </EntityType>
+
+      <!-- ============ Webhook ============ -->
+      <EntityType Name="Webhook">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"                Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId"      Type="Edm.String" Nullable="false"/>
+        <Property Name="Url"               Type="Edm.String" Nullable="false"/>
+        <Property Name="Events"            Type="Edm.String" Nullable="false"/>
+        <Property Name="SecretHashed"      Type="Edm.String" Nullable="false"/>
+        <Property Name="Status"            Type="Edm.String" Nullable="false"/>
+        <Property Name="LastDeliveryAt"    Type="Edm.DateTimeOffset"/>
+        <Property Name="LastResponseCode"  Type="Edm.Int64"/>
+        <Property Name="CreatedAt"         Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+            <String>Paused</String>
+            <String>Deleted</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/webhook.cedar"/>
+      </EntityType>
+
+      <!-- ============ HttpEndpoint (kernel delta) ============ -->
+      <EntityType Name="HttpEndpoint">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"                 Type="Edm.String" Nullable="false"/>
+        <Property Name="PathPrefix"         Type="Edm.String" Nullable="false"/>
+        <Property Name="Methods"            Type="Edm.String" Nullable="false"/>
+        <Property Name="IntegrationModule"  Type="Edm.String" Nullable="false"/>
+        <Property Name="RequiresAuth"       Type="Edm.Boolean" Nullable="false"/>
+        <Property Name="TimeoutSecs"        Type="Edm.Int32"   Nullable="false"/>
+        <Property Name="Status"             Type="Edm.String"  Nullable="false"/>
+        <Property Name="CreatedAt"          Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+            <String>Paused</String>
+            <String>Deleted</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/http_endpoint.cedar"/>
+      </EntityType>
+
+      <!-- ============ Entity Container ============ -->
+      <EntityContainer Name="Container">
+        <EntitySet Name="Blobs"          EntityType="Temper.Git.Blob"/>
+        <EntitySet Name="Trees"          EntityType="Temper.Git.Tree"/>
+        <EntitySet Name="TreeEntries"    EntityType="Temper.Git.TreeEntry"/>
+        <EntitySet Name="Commits"        EntityType="Temper.Git.Commit"/>
+        <EntitySet Name="Tags"           EntityType="Temper.Git.Tag"/>
+        <EntitySet Name="Repositories"   EntityType="Temper.Git.Repository"/>
+        <EntitySet Name="Refs"           EntityType="Temper.Git.Ref"/>
+        <EntitySet Name="PullRequests"   EntityType="Temper.Git.PullRequest"/>
+        <EntitySet Name="Reviews"        EntityType="Temper.Git.Review"/>
+        <EntitySet Name="ReviewComments" EntityType="Temper.Git.ReviewComment"/>
+        <EntitySet Name="GitTokens"      EntityType="Temper.Git.GitToken"/>
+        <EntitySet Name="Webhooks"       EntityType="Temper.Git.Webhook"/>
+        <EntitySet Name="HttpEndpoints"  EntityType="Temper.Git.HttpEndpoint"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

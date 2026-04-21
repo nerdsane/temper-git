@@ -1,0 +1,78 @@
+# TreeEntry — one entry of a git tree.
+#
+# A child of Tree. One row per (Tree, Path) pair. Paths are single
+# path components (no slashes) because git trees nest; subdirectories
+# are references to other trees via `Mode=Tree` and `ObjectSha=<tree_sha>`.
+#
+# Id is a UUIDv7 rather than a hash, because the same (Path, Mode,
+# ObjectSha) triple can appear in many trees and we don't deduplicate
+# the TreeEntry rows (each tree owns its entries). The canonical tree
+# bytes are computed from these rows at serialize time.
+#
+# Immutable after creation; `sort_entries` in tg-canonical enforces
+# canonical ordering at tree-hash time.
+
+[automaton]
+name = "TreeEntry"
+states = ["Durable"]
+initial = "Durable"
+
+[[invariant]]
+name = "DurableIsFinal"
+when = ["Durable"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "PathHasNoSlash"
+require = { all_of = [
+  { field = "Path", matches = "^[^/]+$" },
+]}
+message = "TreeEntry.Path must be a single path component (no '/')"
+
+[[field_invariant]]
+name = "PathNonEmpty"
+require = { all_of = [
+  { field = "Path", matches = "^.+$" },
+]}
+message = "TreeEntry.Path must be non-empty"
+
+[[field_invariant]]
+name = "ModeIsCanonical"
+require = { any_of = [
+  { field = "Mode", equals = "100644" },
+  { field = "Mode", equals = "100755" },
+  { field = "Mode", equals = "120000" },
+  { field = "Mode", equals = "160000" },
+  { field = "Mode", equals = "40000" },
+]}
+message = "TreeEntry.Mode must be one of git's canonical mode strings"
+
+[[field_invariant]]
+name = "BlobModeHasBlobKind"
+when = { any_of = [
+  { field = "Mode", equals = "100644" },
+  { field = "Mode", equals = "100755" },
+  { field = "Mode", equals = "120000" },
+  { field = "Mode", equals = "160000" },
+]}
+require = { all_of = [
+  { field = "Kind", equals = "blob" },
+]}
+message = "File/executable/symlink/submodule modes require Kind=blob"
+
+[[field_invariant]]
+name = "TreeModeHasTreeKind"
+when = { field = "Mode", equals = "40000" }
+require = { all_of = [
+  { field = "Kind", equals = "tree" },
+]}
+message = "Mode 40000 requires Kind=tree"
+
+[[field_invariant]]
+name = "ObjectShaIsSha1Hex"
+require = { all_of = [
+  { field = "ObjectSha", matches = "^[0-9a-f]{40}$" },
+]}
+message = "TreeEntry.ObjectSha must be 40 lowercase hex chars (git SHA-1)"

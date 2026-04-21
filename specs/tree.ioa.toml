@@ -1,0 +1,31 @@
+# Tree — git tree object.
+#
+# A directory in git's object model. One tree = a sorted list of
+# `TreeEntry` children, each pointing at another tree or a blob. The
+# tree's Id is the SHA-1 hex of the canonical serialization
+# `tree <body_len>\0<entries>` where entries are sorted per git's
+# name-order (see `canonical/src/tree.rs::sort_entries`).
+#
+# Immutable. Append-only via POST. Cedar denies PATCH/DELETE.
+# Garbage collection of unreachable trees is Phase 2.
+#
+# Children (TreeEntry rows) are written in the same transaction as
+# the Tree row via a BatchWriteFiles / equivalent action (see
+# `Repository.WriteFile`) — never orphaned.
+
+[automaton]
+name = "Tree"
+states = ["Durable"]
+initial = "Durable"
+
+[[invariant]]
+name = "DurableIsFinal"
+when = ["Durable"]
+assert = "no_further_transitions"
+
+[[field_invariant]]
+name = "IdIsSha1Hex"
+require = { all_of = [
+  { field = "Id", matches = "^[0-9a-f]{40}$" },
+]}
+message = "Tree.Id must be 40 lowercase hex chars (git SHA-1)"

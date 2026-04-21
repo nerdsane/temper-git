@@ -1,0 +1,62 @@
+# Tag — git annotated-tag object.
+#
+# Lightweight tags (a Ref pointing directly at a commit) are not
+# represented here; they're just Ref rows with `Kind=tag`. This
+# entity covers annotated tags only — those that have their own
+# tag-object with tagger, message, and optional signature.
+#
+# Id = SHA-1 hex of canonical tag bytes (see `canonical/src/tag.rs`).
+# Immutable.
+#
+# Target is the tagged object (typically a Commit; can be any object
+# type per git's rules — even another tag).
+
+[automaton]
+name = "Tag"
+states = ["Durable"]
+initial = "Durable"
+
+[[invariant]]
+name = "DurableIsFinal"
+when = ["Durable"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "IdIsSha1Hex"
+require = { all_of = [
+  { field = "Id", matches = "^[0-9a-f]{40}$" },
+]}
+message = "Tag.Id must be 40 lowercase hex chars"
+
+[[field_invariant]]
+name = "TargetShaIsSha1Hex"
+require = { all_of = [
+  { field = "TargetSha", matches = "^[0-9a-f]{40}$" },
+]}
+message = "Tag.TargetSha must be 40 lowercase hex chars"
+
+[[field_invariant]]
+name = "TargetTypeValid"
+require = { any_of = [
+  { field = "TargetType", equals = "commit" },
+  { field = "TargetType", equals = "tree" },
+  { field = "TargetType", equals = "blob" },
+  { field = "TargetType", equals = "tag" },
+]}
+message = "Tag.TargetType must be one of commit | tree | blob | tag"
+
+[[field_invariant]]
+name = "TagNameNonEmpty"
+require = { all_of = [
+  { field = "TagName", matches = "^\\S+$" },
+]}
+message = "Tag.TagName must be non-empty, no whitespace"
+
+[[field_invariant]]
+name = "TaggerFormat"
+require = { all_of = [
+  { field = "Tagger", matches = ".+<.+@.+>\\s+\\d+\\s+[+-]\\d{4}" },
+]}
+message = "Tag.Tagger must match 'Name <email> <unix_ts> <tz>'"

@@ -1,0 +1,43 @@
+# Blob — git blob object.
+#
+# One blob = the byte content of one file version. Immutable. Keyed by
+# SHA-1 hex of the canonical serialization `blob <len>\0<bytes>` (see
+# `canonical/src/blob.rs` for the emitter that produces those bytes
+# byte-exactly against `git hash-object`).
+#
+# Storage substrate (ADR-0004): inline SQLite BLOB column in the repo's
+# own libSQL database. No spill tier. Content up to SQLite's BLOB max
+# (~1 GiB default, configurable to ~2.1 GiB); >1 GiB blobs need
+# chunking which is out of scope for v1 (RFC-0001 §Open questions).
+#
+# Append-only semantics (Cedar denies PATCH/DELETE). A repository
+# garbage-collect action (future, Phase 2) will be the only legitimate
+# way to remove unreachable blobs.
+
+[automaton]
+name = "Blob"
+states = ["Durable"]
+initial = "Durable"
+
+# --- Safety invariants ---
+
+[[invariant]]
+name = "DurableIsFinal"
+when = ["Durable"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "IdIsSha1Hex"
+require = { all_of = [
+  { field = "Id", matches = "^[0-9a-f]{40}$" },
+]}
+message = "Blob.Id must be 40 lowercase hex chars (git SHA-1)"
+
+[[field_invariant]]
+name = "SizeMatchesContent"
+require = { all_of = [
+  { field = "Size", gte = 0 },
+]}
+message = "Blob.Size must be non-negative"

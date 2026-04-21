@@ -1,0 +1,85 @@
+# Webhook — outbound HTTP notification on repo events.
+#
+# Delivery itself is a Phase 2 feature (RFC-0001 §Scope). The entity
+# and state machine land in Phase 1 so that REST endpoints that
+# create/list/update webhooks work from v1, and the delivery
+# integration can be bolted on without schema churn.
+#
+# State: Active → Paused → Active (pause/resume) → Deleted (terminal).
+
+[automaton]
+name = "Webhook"
+states = ["Active", "Paused", "Deleted"]
+initial = "Active"
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["RepositoryId", "Url", "Events", "SecretHashed"]
+
+[[action]]
+name = "Pause"
+kind = "input"
+from = ["Active"]
+to = "Paused"
+params = ["Reason"]
+
+[[action]]
+name = "Resume"
+kind = "input"
+from = ["Paused"]
+to = "Active"
+
+[[action]]
+name = "UpdateConfig"
+kind = "input"
+from = ["Active", "Paused"]
+to = "Active"
+params = ["Url", "Events", "SecretHashed"]
+
+[[action]]
+name = "RecordDelivery"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["LastDeliveryAt", "LastResponseCode"]
+hint = "Update delivery stats. Fired by the webhook-delivery integration (Phase 2)."
+
+[[action]]
+name = "Delete"
+kind = "input"
+from = ["Active", "Paused"]
+to = "Deleted"
+
+# --- Output events ---
+
+[[action]]
+name = "WebhookDeletedEvent"
+kind = "output"
+
+# --- Safety invariants ---
+
+[[invariant]]
+name = "DeletedIsFinal"
+when = ["Deleted"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "UrlIsHttps"
+require = { all_of = [
+  { field = "Url", matches = "^https?://.+" },
+]}
+message = "Webhook.Url must be http(s)://..."
+
+[[field_invariant]]
+name = "EventsNonEmpty"
+require = { all_of = [
+  { field = "Events", matches = ".+" },
+]}
+message = "Webhook.Events must be a non-empty comma-separated list"

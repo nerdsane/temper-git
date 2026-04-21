@@ -1,0 +1,61 @@
+# Commit — git commit object.
+#
+# Id = SHA-1 hex of the canonical commit bytes (see
+# `canonical/src/commit.rs::commit_canonical_bytes`). Immutable.
+#
+# One commit row references one Tree (`TreeSha`) and zero-or-more
+# parent commits (`ParentShas`). Zero parents = initial commit; one
+# parent = normal linear commit; two or more = merge.
+#
+# `CanonicalBytes` stores the exact bytes used to compute Id. We keep
+# them verbatim so the pack emitter can stream them without
+# re-serializing; also so byte-exact round-trips survive any
+# serialization edge we haven't thought about.
+#
+# Cross-invariants (repository.cross-invariants.toml) enforce:
+# - every ParentShas entry resolves to an existing Commit on the
+#   same RepositoryId
+# - TreeSha resolves to an existing Tree on the same RepositoryId
+# - parent DAG is acyclic (no commit can be its own ancestor)
+#
+# Append-only: Cedar denies PATCH/DELETE.
+
+[automaton]
+name = "Commit"
+states = ["Durable"]
+initial = "Durable"
+
+[[invariant]]
+name = "DurableIsFinal"
+when = ["Durable"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "IdIsSha1Hex"
+require = { all_of = [
+  { field = "Id", matches = "^[0-9a-f]{40}$" },
+]}
+message = "Commit.Id must be 40 lowercase hex chars (git SHA-1)"
+
+[[field_invariant]]
+name = "TreeShaIsSha1Hex"
+require = { all_of = [
+  { field = "TreeSha", matches = "^[0-9a-f]{40}$" },
+]}
+message = "Commit.TreeSha must be 40 lowercase hex chars"
+
+[[field_invariant]]
+name = "AuthorNonEmpty"
+require = { all_of = [
+  { field = "Author", matches = ".+<.+@.+>\\s+\\d+\\s+[+-]\\d{4}" },
+]}
+message = "Commit.Author must match 'Name <email> <unix_ts> <tz>'"
+
+[[field_invariant]]
+name = "CommitterNonEmpty"
+require = { all_of = [
+  { field = "Committer", matches = ".+<.+@.+>\\s+\\d+\\s+[+-]\\d{4}" },
+]}
+message = "Commit.Committer must match 'Name <email> <unix_ts> <tz>'"

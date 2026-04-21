@@ -1,0 +1,199 @@
+# Repository — the umbrella entity for a git repo hosted on temper-git.
+#
+# Every Repository gets its own libSQL database (ADR-0004); the
+# Repository row on the control-plane DB carries the metadata and
+# provisioning state of that repo's dedicated storage. A
+# `repository_provision` WASM integration fires on `Create` to
+# actually spin the per-repo DB via libsql admin API and backfill
+# the `LibsqlDbName` field.
+#
+# State machine:
+#
+#   Provisioning ─(MarkProvisioned)─▶ Active ─(Archive)─▶ Archived
+#                                       │ ▲
+#                                       │ │
+#                                     WriteFile/DeleteFile/
+#                                     BatchWriteFiles/
+#                                     CreateBranch/
+#                                     MergePullRequest/
+#                                     SetDefaultBranch
+#                                     (all self-loop on Active)
+#
+# Archived is terminal. Rationale: once a repo is archived, history
+# is frozen; re-activation is a manual admin operation outside the
+# state machine (delete + re-create with restore).
+
+[automaton]
+name = "Repository"
+states = ["Provisioning", "Active", "Archived"]
+initial = "Provisioning"
+
+# --- Actions ---
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Provisioning"]
+to = "Provisioning"
+params = ["OwnerAccountId", "Name", "Description", "DefaultBranch", "Visibility"]
+hint = "Seed the Repository row. Fires the repository_provision integration which creates the per-repo libSQL DB and then advances to Active via MarkProvisioned."
+
+[[action]]
+name = "MarkProvisioned"
+kind = "input"
+from = ["Provisioning"]
+to = "Active"
+params = ["LibsqlDbName"]
+hint = "Callback from repository_provision once the per-repo DB is ready. Backfills LibsqlDbName and transitions to Active."
+
+[[action]]
+name = "SetDefaultBranch"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["DefaultBranch"]
+hint = "Change the repo's default branch. Must reference an existing Ref."
+
+[[action]]
+name = "WriteFile"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["Ref", "Path", "Content", "Mode", "Message", "Author", "ClientRequestId"]
+hint = "Create or update one file. Fires a scm_write_file integration which walks the Ref's current Tree, builds a new Tree with the file changed, writes the Commit, and advances the Ref. Atomic transaction on the repo's libSQL DB."
+effect = [{ type = "trigger", name = "scm_write_file" }]
+
+[[action]]
+name = "DeleteFile"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["Ref", "Path", "Message", "Author", "ClientRequestId"]
+hint = "Delete one file from a Ref's current Tree. Same atomicity as WriteFile."
+effect = [{ type = "trigger", name = "scm_write_file" }]
+
+[[action]]
+name = "BatchWriteFiles"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["Ref", "Changes", "Message", "Author", "ClientRequestId"]
+hint = "Atomic multi-file commit. Changes is a JSON array of {Op:'write'|'delete', Path, Content?, Mode?}."
+effect = [{ type = "trigger", name = "scm_write_file" }]
+
+[[action]]
+name = "CreateBranch"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["FromRef", "NewRef"]
+hint = "Create a new Ref pointing at the same commit as FromRef."
+
+[[action]]
+name = "MergePullRequest"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["PullRequestId", "Strategy", "Message", "ClientRequestId"]
+hint = "Apply a PullRequest's source_ref onto target_ref. Strategy is one of merge, squash, rebase. Emits a MergedCommit + advances target_ref."
+effect = [{ type = "trigger", name = "scm_merge_pr" }]
+
+[[action]]
+name = "Archive"
+kind = "input"
+from = ["Active"]
+to = "Archived"
+hint = "Archive the repository. History is preserved but no further mutations are accepted. Terminal state."
+
+# --- Output events ---
+
+[[action]]
+name = "CommitCreated"
+kind = "output"
+hint = "Emitted when a new Commit row is written under this repo."
+
+[[action]]
+name = "RefUpdated"
+kind = "output"
+hint = "Emitted when a Ref's TargetCommitSha changes."
+
+[[action]]
+name = "RepositoryProvisionedEvent"
+kind = "output"
+hint = "Emitted when the per-repo libSQL DB is ready and the entity is Active."
+
+[[action]]
+name = "RepositoryArchivedEvent"
+kind = "output"
+hint = "Emitted on Archive."
+
+# --- Safety invariants ---
+
+[[invariant]]
+name = "ArchivedIsFinal"
+when = ["Archived"]
+assert = "no_further_transitions"
+
+# --- Cross-field validation ---
+
+[[field_invariant]]
+name = "NameIsSlugFormat"
+require = { all_of = [
+  { field = "Name", matches = "^[a-z0-9][a-z0-9_-]{0,99}$" },
+]}
+message = "Repository.Name must match ^[a-z0-9][a-z0-9_-]{0,99}$"
+
+[[field_invariant]]
+name = "VisibilityKnown"
+require = { any_of = [
+  { field = "Visibility", equals = "private" },
+  { field = "Visibility", equals = "public" },
+]}
+message = "Repository.Visibility must be private or public"
+
+[[field_invariant]]
+name = "DefaultBranchRefNameFormat"
+require = { all_of = [
+  { field = "DefaultBranch", matches = "^[A-Za-z0-9_/.-]+$" },
+]}
+message = "Repository.DefaultBranch must be a valid git ref shorthand"
+
+[[field_invariant]]
+name = "ActiveRequiresLibsqlDbName"
+when = { field = "Status", equals = "Active" }
+require = { all_of = [
+  { not = { field = "LibsqlDbName", absent = true } },
+]}
+message = "Active Repository must have LibsqlDbName populated (set by MarkProvisioned)"
+
+# --- Integrations ---
+
+[[integration]]
+name = "repository_provision"
+trigger = "repository_provision"
+type = "wasm"
+module = "repository_provision"
+on_success = "MarkProvisioned"
+on_failure = "Archive"
+
+[integration.config]
+libsql_admin_url = "http://libsql-server.temper-git.svc.cluster.local:8080"
+timeout_secs = 30
+
+[[integration]]
+name = "scm_write_file"
+trigger = "scm_write_file"
+type = "wasm"
+module = "scm_write_file"
+
+[integration.config]
+timeout_secs = 60
+
+[[integration]]
+name = "scm_merge_pr"
+trigger = "scm_merge_pr"
+type = "wasm"
+module = "scm_merge_pr"
+
+[integration.config]
+timeout_secs = 120
