@@ -1,0 +1,24 @@
+[package]
+name = "tg-canonical"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Byte-exact canonical serialization of git objects (blob, tree, commit, tag) with SHA-1 hashing. The foundation of temper-git's byte-exact compat contract."
+
+[lib]
+# Library lives on host (for tests + any Rust-side consumers) and also
+# links into WASM modules. cdylib is added per-module; the base here is
+# rlib only.
+crate-type = ["rlib"]
+
+[dependencies]
+# Deliberately zero non-std runtime deps. SHA-1 is implemented inline to
+# avoid pulling in sha1/sha-1/openssl/etc.; keeps the WASM footprint
+# minimal and eliminates a supply-chain surface for a trivial primitive.
+
+[dev-dependencies]
+# For fixture round-trips against real git.
+# Tests shell out to `git hash-object` and `git cat-file` to verify
+# byte-exact parity — see ADR-0003.

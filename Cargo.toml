@@ -1,0 +1,43 @@
+# temper-git workspace.
+#
+# Contains:
+#   * `canonical/`   — byte-exact git object serialization + SHA-1 hashing.
+#                      Pure Rust, no temper deps. Runs on host (tests) and
+#                      compiles to wasm32-wasip1 (used by protocol WASMs).
+#   * `wasm-modules/*/` — each protocol handler is a separate cdylib crate.
+#                      Added as members once scaffolded.
+#
+# Temper's own workspace (at `temper/`) is a submodule — not a workspace
+# member. Our WASM modules depend on `temper-wasm-sdk` from there via
+# path; the temper kernel itself builds independently via its own Cargo.
+
+[workspace]
+resolver = "2"
+members = [
+    "canonical",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nerdsane/temper-git"
+
+[workspace.dependencies]
+# Temper WASM SDK — referenced from submodule for WASM modules.
+temper-wasm-sdk = { path = "temper/crates/temper-wasm-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# Tight WASM build: optimize for size.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.test]
+# Canonical library tests run on host; debug profile for fast iteration.
+opt-level = 1
