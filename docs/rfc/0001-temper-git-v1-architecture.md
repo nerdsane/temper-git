@@ -390,6 +390,19 @@ delays, we carry the patches on our submodule branch with explicit
 rebase discipline. These are not optional — without them, the
 architecture doesn't work.
 
+**Status (2026-04-20):** both ADRs drafted and committed upstream on
+isolated branches, awaiting review before PR:
+
+- K-1: [`adr-0056-http-endpoint`](../../temper/docs/adrs/0056-http-endpoint.md)
+  on branch `adr-0056-http-endpoint` of the temper submodule.
+- K-2: [`adr-0057-http-call-streaming`](../../temper/docs/adrs/0057-http-call-streaming.md)
+  on branch `adr-0057-http-call-streaming` of the temper submodule.
+
+Both branches carry ADR text only (no implementation). Phase 1 of each
+ADR lands the spec + Cedar + CSDL; Phase 2 lands the runtime wiring.
+The submodule pointer in this repo will bump once at least K-1 Phase 1
+is merged upstream.
+
 ### K-1: `HttpEndpoint` IOA entity + router integration
 
 A new first-class IOA entity (declared in `temper-platform` specs).
