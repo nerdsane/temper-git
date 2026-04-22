@@ -5,3 +5,7 @@ version = 4
 [[package]]
 name = "tg-canonical"
 version = "0.0.1"
+
+[[package]]
+name = "tg-wire"
+version = "0.0.1"

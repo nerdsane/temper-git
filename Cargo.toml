@@ -15,6 +15,7 @@
 resolver = "2"
 members = [
     "canonical",
+    "wire",
 ]
 
 [workspace.package]
