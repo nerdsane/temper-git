@@ -59,12 +59,13 @@ COPY specs/    /app/os-apps/temper-git/specs/
 COPY policies/ /app/os-apps/temper-git/policies/
 
 ENV RUST_LOG=info,temper=info \
-    TEMPER_OS_APPS_DIR=/app/os-apps \
-    TEMPER_AUTO_INSTALL_APPS=true
+    TEMPER_OS_APPS_DIR=/app/os-apps
 
 EXPOSE 3000
-# v0 uses --storage turso with a local libSQL file on the mounted
-# PVC (see TURSO_URL in the Deployment). Postgres storage is a
-# future path once ADR-0006's Cloud-SQL-backed EventStore and
-# ADR-0004's bottomless-to-GCS migration both land.
-CMD ["temper", "serve", "--port", "3000", "--storage", "turso"]
+# `--skill temper-git` installs the baked app into the `default`
+# tenant on first boot. Turso storage persists the install in
+# tenant_installed_apps, so subsequent boots restore it from the DB
+# (bootstrap Phase 8b) and this flag is a no-op.
+# Postgres storage is a future path once ADR-0006's Cloud-SQL-backed
+# EventStore and ADR-0004's bottomless-to-GCS migration both land.
+CMD ["temper", "serve", "--port", "3000", "--storage", "turso", "--skill", "temper-git"]
