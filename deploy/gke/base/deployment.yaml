@@ -37,6 +37,12 @@ spec:
         - name: temper-git
           image: us-central1-docker.pkg.dev/darkhelix-sandbox/darkhelix/temper-git:v0.1.0-phase1
           imagePullPolicy: IfNotPresent
+          # Override the image CMD so v0.1.0-phase1 (which shipped
+          # with --storage postgres baked in) uses turso. Removed
+          # from v0.1.0-phase1b onward once the Dockerfile default
+          # matches v0's local-libSQL intent.
+          command: ["temper"]
+          args: ["serve", "--port", "3000", "--storage", "turso"]
           ports:
             - name: http
               containerPort: 3000

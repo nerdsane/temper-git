@@ -63,4 +63,8 @@ ENV RUST_LOG=info,temper=info \
     TEMPER_AUTO_INSTALL_APPS=true
 
 EXPOSE 3000
-CMD ["temper", "serve", "--port", "3000", "--storage", "postgres"]
+# v0 uses --storage turso with a local libSQL file on the mounted
+# PVC (see TURSO_URL in the Deployment). Postgres storage is a
+# future path once ADR-0006's Cloud-SQL-backed EventStore and
+# ADR-0004's bottomless-to-GCS migration both land.
+CMD ["temper", "serve", "--port", "3000", "--storage", "turso"]
