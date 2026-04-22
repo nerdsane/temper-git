@@ -56,6 +56,12 @@ spec:
               value: "/app/os-apps"
             - name: TEMPER_AUTO_INSTALL_APPS
               value: "true"
+            # Tenant that owns the temper-git app's entities. Named
+            # rather than "default" so cross-tenant Cedar stays clear
+            # and so we can hold multiple tenants on one instance
+            # later (dev/staging) without a rebuild.
+            - name: TEMPER_TENANT
+              value: "temper-git"
             # Local libSQL file on the PVC. When ADR-0004 lands,
             # swap this for the per-repo-router URL and add
             # bottomless-s3 env vars pointing at GCS.
