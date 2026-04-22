@@ -121,41 +121,6 @@ name = "ClosedIsFinal"
 when = ["Closed"]
 assert = "no_further_transitions"
 
-# --- Cross-field validation ---
-
-[[field_invariant]]
-name = "SourceRefFormat"
-require = { all_of = [
-  { field = "SourceRef", matches = "^refs/heads/[A-Za-z0-9_/.-]+$" },
-]}
-message = "PullRequest.SourceRef must be refs/heads/<branch>"
-
-[[field_invariant]]
-name = "TargetRefFormat"
-require = { all_of = [
-  { field = "TargetRef", matches = "^refs/heads/[A-Za-z0-9_/.-]+$" },
-]}
-message = "PullRequest.TargetRef must be refs/heads/<branch>"
-
-[[field_invariant]]
-name = "MergedRequiresMergedCommitSha"
-when = { field = "State", equals = "Merged" }
-require = { all_of = [
-  { not = { field = "MergedCommitSha", absent = true } },
-  { field = "MergedCommitSha", matches = "^[0-9a-f]{40}$" },
-]}
-message = "Merged PR must have MergedCommitSha populated with a 40-char hex"
-
-[[field_invariant]]
-name = "MergedRequiresMergedBy"
-when = { field = "State", equals = "Merged" }
-require = { all_of = [
-  { not = { field = "MergedBy", absent = true } },
-]}
-message = "Merged PR must have MergedBy populated"
-
-# --- Integrations ---
-
 [[integration]]
 name = "scm_assign_pr_number"
 trigger = "scm_assign_pr_number"

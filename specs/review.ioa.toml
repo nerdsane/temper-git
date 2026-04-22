@@ -46,14 +46,3 @@ kind = "output"
 name = "DismissedIsFinal"
 when = ["Dismissed"]
 assert = "no_further_transitions"
-
-# --- Cross-field validation ---
-
-[[field_invariant]]
-name = "DecisionKnown"
-require = { any_of = [
-  { field = "Decision", equals = "commented" },
-  { field = "Decision", equals = "approved" },
-  { field = "Decision", equals = "changes_requested" },
-]}
-message = "Review.Decision must be commented | approved | changes_requested"

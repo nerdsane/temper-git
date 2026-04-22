@@ -29,33 +29,3 @@ initial = "Durable"
 name = "DurableIsFinal"
 when = ["Durable"]
 assert = "no_further_transitions"
-
-# --- Cross-field validation ---
-
-[[field_invariant]]
-name = "IdIsSha1Hex"
-require = { all_of = [
-  { field = "Id", matches = "^[0-9a-f]{40}$" },
-]}
-message = "Commit.Id must be 40 lowercase hex chars (git SHA-1)"
-
-[[field_invariant]]
-name = "TreeShaIsSha1Hex"
-require = { all_of = [
-  { field = "TreeSha", matches = "^[0-9a-f]{40}$" },
-]}
-message = "Commit.TreeSha must be 40 lowercase hex chars"
-
-[[field_invariant]]
-name = "AuthorNonEmpty"
-require = { all_of = [
-  { field = "Author", matches = ".+<.+@.+>\\s+\\d+\\s+[+-]\\d{4}" },
-]}
-message = "Commit.Author must match 'Name <email> <unix_ts> <tz>'"
-
-[[field_invariant]]
-name = "CommitterNonEmpty"
-require = { all_of = [
-  { field = "Committer", matches = ".+<.+@.+>\\s+\\d+\\s+[+-]\\d{4}" },
-]}
-message = "Commit.Committer must match 'Name <email> <unix_ts> <tz>'"

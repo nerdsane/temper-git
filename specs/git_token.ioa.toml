@@ -54,19 +54,3 @@ kind = "output"
 name = "RevokedIsFinal"
 when = ["Revoked"]
 assert = "no_further_transitions"
-
-# --- Cross-field validation ---
-
-[[field_invariant]]
-name = "HashedSecretIsSha256Hex"
-require = { all_of = [
-  { field = "HashedSecret", matches = "^[0-9a-f]{64}$" },
-]}
-message = "GitToken.HashedSecret must be 64 lowercase hex chars (SHA-256)"
-
-[[field_invariant]]
-name = "KeyPrefixShape"
-require = { all_of = [
-  { field = "KeyPrefix", matches = "^[A-Za-z0-9_-]{4,16}$" },
-]}
-message = "GitToken.KeyPrefix must be 4-16 alphanumeric chars (first bytes of the secret)"

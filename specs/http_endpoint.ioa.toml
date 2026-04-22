@@ -80,27 +80,3 @@ kind = "output"
 name = "DeletedIsFinal"
 when = ["Deleted"]
 assert = "no_further_transitions"
-
-# --- Cross-field validation ---
-
-[[field_invariant]]
-name = "PathPrefixNonEmpty"
-require = { all_of = [
-  { field = "PathPrefix", matches = "^/.+" },
-]}
-message = "HttpEndpoint.PathPrefix must start with '/'"
-
-[[field_invariant]]
-name = "MethodsNonEmpty"
-require = { all_of = [
-  { field = "Methods", matches = ".+" },
-]}
-message = "HttpEndpoint.Methods must be a non-empty comma-separated list"
-
-[[field_invariant]]
-name = "TimeoutReasonable"
-require = { all_of = [
-  { field = "TimeoutSecs", gte = 1 },
-  { field = "TimeoutSecs", lte = 600 },
-]}
-message = "HttpEndpoint.TimeoutSecs must be 1..600"

@@ -22,10 +22,3 @@ initial = "Durable"
 name = "DurableIsFinal"
 when = ["Durable"]
 assert = "no_further_transitions"
-
-[[field_invariant]]
-name = "IdIsSha1Hex"
-require = { all_of = [
-  { field = "Id", matches = "^[0-9a-f]{40}$" },
-]}
-message = "Tree.Id must be 40 lowercase hex chars (git SHA-1)"

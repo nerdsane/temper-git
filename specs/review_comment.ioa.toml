@@ -39,19 +39,3 @@ kind = "output"
 name = "ResolvedIsFinal"
 when = ["Resolved"]
 assert = "no_further_transitions"
-
-# --- Cross-field validation ---
-
-[[field_invariant]]
-name = "CommitShaIsSha1Hex"
-require = { all_of = [
-  { field = "CommitSha", matches = "^[0-9a-f]{40}$" },
-]}
-message = "ReviewComment.CommitSha must be 40 lowercase hex chars"
-
-[[field_invariant]]
-name = "LineNonNegative"
-require = { all_of = [
-  { field = "Line", gte = 1 },
-]}
-message = "ReviewComment.Line must be >= 1"

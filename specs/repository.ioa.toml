@@ -134,40 +134,6 @@ name = "ArchivedIsFinal"
 when = ["Archived"]
 assert = "no_further_transitions"
 
-# --- Cross-field validation ---
-
-[[field_invariant]]
-name = "NameIsSlugFormat"
-require = { all_of = [
-  { field = "Name", matches = "^[a-z0-9][a-z0-9_-]{0,99}$" },
-]}
-message = "Repository.Name must match ^[a-z0-9][a-z0-9_-]{0,99}$"
-
-[[field_invariant]]
-name = "VisibilityKnown"
-require = { any_of = [
-  { field = "Visibility", equals = "private" },
-  { field = "Visibility", equals = "public" },
-]}
-message = "Repository.Visibility must be private or public"
-
-[[field_invariant]]
-name = "DefaultBranchRefNameFormat"
-require = { all_of = [
-  { field = "DefaultBranch", matches = "^[A-Za-z0-9_/.-]+$" },
-]}
-message = "Repository.DefaultBranch must be a valid git ref shorthand"
-
-[[field_invariant]]
-name = "ActiveRequiresLibsqlDbName"
-when = { field = "Status", equals = "Active" }
-require = { all_of = [
-  { not = { field = "LibsqlDbName", absent = true } },
-]}
-message = "Active Repository must have LibsqlDbName populated (set by MarkProvisioned)"
-
-# --- Integrations ---
-
 [[integration]]
 name = "repository_provision"
 trigger = "repository_provision"

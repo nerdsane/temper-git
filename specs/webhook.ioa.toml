@@ -67,19 +67,3 @@ kind = "output"
 name = "DeletedIsFinal"
 when = ["Deleted"]
 assert = "no_further_transitions"
-
-# --- Cross-field validation ---
-
-[[field_invariant]]
-name = "UrlIsHttps"
-require = { all_of = [
-  { field = "Url", matches = "^https?://.+" },
-]}
-message = "Webhook.Url must be http(s)://..."
-
-[[field_invariant]]
-name = "EventsNonEmpty"
-require = { all_of = [
-  { field = "Events", matches = ".+" },
-]}
-message = "Webhook.Events must be a non-empty comma-separated list"

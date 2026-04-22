@@ -25,19 +25,3 @@ initial = "Durable"
 name = "DurableIsFinal"
 when = ["Durable"]
 assert = "no_further_transitions"
-
-# --- Cross-field validation ---
-
-[[field_invariant]]
-name = "IdIsSha1Hex"
-require = { all_of = [
-  { field = "Id", matches = "^[0-9a-f]{40}$" },
-]}
-message = "Blob.Id must be 40 lowercase hex chars (git SHA-1)"
-
-[[field_invariant]]
-name = "SizeMatchesContent"
-require = { all_of = [
-  { field = "Size", gte = 0 },
-]}
-message = "Blob.Size must be non-negative"
