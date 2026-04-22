@@ -65,19 +65,21 @@ spec:
             - name: data
               mountPath: /var/lib/temper-git
           readinessProbe:
-            httpGet:
-              path: /tdata
-              port: http
-            initialDelaySeconds: 10
-            periodSeconds: 5
+            # Temper doesn't expose /health (TODO: upstream RFE); /tdata
+            # returns 400 without an X-Tenant-Id header, so TCP probe
+            # is the honest signal we can get today. Matches the
+            # dark-helix temper deployment's probe.
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3
           livenessProbe:
-            httpGet:
-              path: /tdata
-              port: http
-            initialDelaySeconds: 30
-            periodSeconds: 15
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 60
+            periodSeconds: 20
             timeoutSeconds: 2
             failureThreshold: 3
           resources:
