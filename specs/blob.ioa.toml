@@ -19,9 +19,17 @@ name = "Blob"
 states = ["Durable"]
 initial = "Durable"
 
-# --- Safety invariants ---
+# --- Actions ---
+#
+# Blob rows are created by the scm_write_file / git_receive_pack
+# integrations which compute the SHA-1 via canonical/ first. Create
+# is a self-loop on Durable that captures the canonical byte
+# content + repo scope. No other input actions exist, so the row is
+# immutable by omission; Cedar additionally denies PATCH/DELETE.
 
-[[invariant]]
-name = "DurableIsFinal"
-when = ["Durable"]
-assert = "no_further_transitions"
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Durable"]
+params = ["repository_id", "size", "content", "canonical_bytes"]
+hint = "Record a blob. Id must be the SHA-1 of `blob <len>\\0<content>`; the action handler verifies that."

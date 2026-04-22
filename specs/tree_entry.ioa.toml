@@ -17,7 +17,12 @@ name = "TreeEntry"
 states = ["Durable"]
 initial = "Durable"
 
-[[invariant]]
-name = "DurableIsFinal"
-when = ["Durable"]
-assert = "no_further_transitions"
+# --- Actions ---
+# Immutable by omission. Cedar denies PATCH/DELETE.
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Durable"]
+params = ["tree_id", "repository_id", "path", "mode", "object_sha", "kind"]
+hint = "Record one entry in a tree. Written in the same transaction as the owning Tree row."

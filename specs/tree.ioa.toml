@@ -18,7 +18,13 @@ name = "Tree"
 states = ["Durable"]
 initial = "Durable"
 
-[[invariant]]
-name = "DurableIsFinal"
-when = ["Durable"]
-assert = "no_further_transitions"
+# --- Actions ---
+# Immutable by omission: Create is the only input action. Cedar
+# additionally denies PATCH/DELETE.
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Durable"]
+params = ["repository_id", "canonical_bytes"]
+hint = "Record a tree. Id must equal the SHA-1 of `tree <body_len>\\0<entries>` with entries sorted per canonical/tree.rs."

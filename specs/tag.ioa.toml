@@ -16,7 +16,12 @@ name = "Tag"
 states = ["Durable"]
 initial = "Durable"
 
-[[invariant]]
-name = "DurableIsFinal"
-when = ["Durable"]
-assert = "no_further_transitions"
+# --- Actions ---
+# Immutable by omission. Cedar denies PATCH/DELETE.
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Durable"]
+params = ["repository_id", "target_sha", "target_type", "tag_name", "tagger", "message", "pgp_signature", "canonical_bytes"]
+hint = "Record an annotated tag. Id must equal the SHA-1 of canonical_bytes."
