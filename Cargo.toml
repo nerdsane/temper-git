@@ -16,6 +16,7 @@ resolver = "2"
 members = [
     "canonical",
     "wire",
+    "wasm-modules/git_upload_pack",
 ]
 
 [workspace.package]

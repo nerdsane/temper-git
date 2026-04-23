@@ -1,0 +1,25 @@
+[package]
+name = "git_upload_pack"
+description = "WASM integration: git smart-HTTP upload-pack surface for temper-git."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+temper-wasm-sdk = { workspace = true }
+tg-canonical = { path = "../../canonical" }
+tg-wire = { path = "../../wire" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

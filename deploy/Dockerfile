@@ -57,6 +57,12 @@ RUN mkdir -p /app/os-apps/temper-git
 COPY app.toml APP.md /app/os-apps/temper-git/
 COPY specs/    /app/os-apps/temper-git/specs/
 COPY policies/ /app/os-apps/temper-git/policies/
+# Pre-built WASM integrations. Cargo produces them under
+# target/wasm32-wasip1/release/; build.sh stages them into the
+# per-module layout temper-platform's os-app loader expects:
+# wasm/<module_name>/<module_name>.wasm  (the fallback candidate
+# path in find_wasm_modules).
+COPY wasm/     /app/os-apps/temper-git/wasm/
 
 ENV RUST_LOG=info,temper=info \
     TEMPER_OS_APPS_DIR=/app/os-apps

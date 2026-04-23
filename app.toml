@@ -14,3 +14,12 @@ name = "temper-git"
 description = "Temper-native, byte-exact, GitHub-compatible SCM. Byte-exact smart-HTTP git wire + GitHub REST v3 subset, backed by IOA entities and Cedar policies."
 version = "0.1.0"
 startup_install = "core"
+
+# WASM integrations the app ships. Built per module under
+# `wasm/<name>/target/wasm32-wasip1/release/<name>.wasm` and copied
+# into the image by deploy/Dockerfile.
+[[wasm_modules]]
+name = "git_upload_pack"
+target = "wasm32-wasip1"
+criticality = "app-required"
+startup_loading = "lazy"
