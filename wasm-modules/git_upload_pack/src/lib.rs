@@ -35,7 +35,11 @@ temper_module! {
         let http: InboundHttp = serde_json::from_value(http_value)
             .map_err(|e| format!("http_request parse error: {e}"))?;
 
-        let path = http.path.as_str();
+        // Strip any `?query` from the dispatcher-provided path so
+        // `ends_with("/info/refs")` matches regardless of the
+        // `service=` query parameter git clients append.
+        let raw = http.path.as_str();
+        let path = raw.split('?').next().unwrap_or(raw);
 
         // --- Route 1: info/refs advertisement ------------------------
         if http.method == "GET" && path.ends_with("/info/refs") {
