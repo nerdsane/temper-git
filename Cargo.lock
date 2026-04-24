@@ -82,6 +82,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "git_receive_pack"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "temper-wasm-sdk",
+ "tg-canonical",
+ "tg-wire",
+]
+
+[[package]]
 name = "git_upload_pack"
 version = "0.0.1"
 dependencies = [

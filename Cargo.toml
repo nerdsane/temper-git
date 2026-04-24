@@ -17,6 +17,7 @@ members = [
     "canonical",
     "wire",
     "wasm-modules/git_upload_pack",
+    "wasm-modules/git_receive_pack",
 ]
 
 [workspace.package]

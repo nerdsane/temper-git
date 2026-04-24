@@ -28,3 +28,9 @@ criticality = "app-required"
 # "module not found" because the engine's compiled-module cache
 # is empty until first explicit invoke.
 startup_loading = "eager"
+
+[[wasm_modules]]
+name = "git_receive_pack"
+target = "wasm32-wasip1"
+criticality = "app-required"
+startup_loading = "eager"
