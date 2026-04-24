@@ -22,4 +22,9 @@ startup_install = "core"
 name = "git_upload_pack"
 target = "wasm32-wasip1"
 criticality = "app-required"
-startup_loading = "lazy"
+# Eager: compile + cache into WasmEngine at install time so the
+# first HttpEndpoint dispatch doesn't race with JIT. Lazy mode
+# registers the name→hash mapping only; dispatch then fails with
+# "module not found" because the engine's compiled-module cache
+# is empty until first explicit invoke.
+startup_loading = "eager"
