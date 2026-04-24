@@ -21,10 +21,12 @@
 
 pub mod advertise;
 pub mod capabilities;
+pub mod commands;
 pub mod pack;
 pub mod pkt_line;
 
 pub use advertise::{advertise_info_refs, AdvertisedRef, Service, ZERO_SHA};
 pub use capabilities::{receive_pack_capabilities, upload_pack_capabilities, AGENT};
+pub use commands::{parse_commands, CommandKind, CommandsError, ParsedCommands, RefCommand};
 pub use pack::{parse_pack, ObjectKind, PackError, PackObject};
 pub use pkt_line::{encode, encode_into, flush, PktLineError, MAX_PAYLOAD};

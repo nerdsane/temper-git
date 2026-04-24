@@ -32,6 +32,12 @@ pub fn upload_pack_capabilities() -> String {
 /// * `report-status` — return per-ref status after push.
 /// * `delete-refs` — allow clients to delete refs via push.
 /// * `side-band-64k` — multiplex progress bytes during pack write-out.
+///
+/// Deliberately NOT advertised (RFC-0002 slice A):
+/// * `ofs-delta` — our v0 pack parser rejects delta entries.
+///   Without this capability, clients send plain objects only.
+/// * `atomic` — per-ref best-effort is fine for v0.
+/// * `push-options` — no options to receive yet.
 pub fn receive_pack_capabilities() -> String {
     format!("report-status delete-refs side-band-64k {AGENT}")
 }
