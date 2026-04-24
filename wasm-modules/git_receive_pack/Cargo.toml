@@ -16,6 +16,7 @@ tg-canonical = { path = "../../canonical" }
 tg-wire = { path = "../../wire" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 
 [profile.release]
 opt-level = "s"
