@@ -412,8 +412,11 @@ fn fetch_object_body(
         ObjectKind::Blob => "Blobs",
         ObjectKind::Tag => "Tags",
     };
-    // OData key fetch.
-    let url = format!("{TEMPER_API}/tdata/{set}('{sha}')");
+    // Temper auto-assigns entity_id as a UUID; our SHA lives in the
+    // `Id` field. Use $filter to look it up rather than the key URL.
+    let url = format!(
+        "{TEMPER_API}/tdata/{set}?$filter=Id%20eq%20'{sha}'"
+    );
     let resp = ctx
         .http_call("GET", &url, &admin_headers(), "")
         .map_err(|e| format!("fetch {set}({sha}): {e}"))?;
@@ -422,9 +425,18 @@ fn fetch_object_body(
     }
     let parsed: serde_json::Value =
         serde_json::from_str(&resp.body).map_err(|e| format!("object json: {e}"))?;
-    let fields = parsed
+    let items = parsed
+        .get("value")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let row = items
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("{set}({sha}): no row matched"))?;
+    let fields = row
         .get("fields")
-        .ok_or_else(|| format!("{set}({sha}): no fields"))?;
+        .ok_or_else(|| format!("{set}({sha}): row has no fields"))?;
     let canonical_b64 = fields
         .get("CanonicalBytes")
         .and_then(|v| v.as_str())
@@ -432,7 +444,6 @@ fn fetch_object_body(
     let canonical = B64
         .decode(canonical_b64)
         .map_err(|e| format!("base64 decode: {e}"))?;
-    // Strip `<kind> <len>\0` prefix → body bytes for the pack.
     let nul = canonical
         .iter()
         .position(|&b| b == 0)
