@@ -103,6 +103,7 @@ dependencies = [
 name = "git_upload_pack"
 version = "0.0.1"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
  "temper-wasm-sdk",

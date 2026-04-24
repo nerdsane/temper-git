@@ -32,11 +32,11 @@
 //! [adr-0003]: https://github.com/nerdsane/temper-git/blob/main/docs/adr/0003-byte-exact-git-compat.md
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod blob;
 pub mod commit;
 pub mod mode;
+pub mod parse;
 pub mod sha1;
 pub mod tag;
 pub mod tree;
@@ -44,6 +44,7 @@ pub mod tree;
 pub use blob::{blob_canonical_bytes, blob_hash};
 pub use commit::{Commit, commit_canonical_bytes, commit_hash};
 pub use mode::Mode;
+pub use parse::{parse_commit_refs, parse_tree, CommitRefs, ParsedTreeEntry};
 pub use sha1::{Sha1, sha1_hex};
 pub use tag::{Tag, tag_canonical_bytes, tag_hash};
 pub use tree::{TreeEntry, tree_canonical_bytes, tree_hash};

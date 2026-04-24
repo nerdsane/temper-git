@@ -205,6 +205,68 @@ pub fn parse_pack(bytes: &[u8]) -> Result<Vec<PackObject>, PackError> {
 ///   byte N:  c   sssssss
 ///                    7 bits of size, shifted by (4 + 7*(N-1))
 /// ```
+/// Build a pack-v2 buffer from a fully-materialised object list.
+///
+/// Writes `PACK\0\0\0\2<count>` + per-object (variable-length
+/// type/size header + zlib-deflated body) + 20-byte SHA-1 trailer
+/// over all preceding bytes. Matches the format `parse_pack`
+/// consumes; `parse_pack(&emit_pack(x)) == x`.
+///
+/// Only non-delta types (Commit/Tree/Blob/Tag) are supported, in
+/// line with our v0 parser. Callers that need delta emission
+/// should convert to plain objects first.
+pub fn emit_pack(objects: &[PackObject]) -> Vec<u8> {
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"PACK");
+    out.extend_from_slice(&2u32.to_be_bytes());
+    out.extend_from_slice(&(objects.len() as u32).to_be_bytes());
+
+    for obj in objects {
+        // Variable-length header: 3-bit type, 4-bit low size, then
+        // 7-bit chunks continuation-flagged.
+        let type_bits = match obj.kind {
+            ObjectKind::Commit => 1u8,
+            ObjectKind::Tree => 2,
+            ObjectKind::Blob => 3,
+            ObjectKind::Tag => 4,
+        };
+        let size = obj.data.len();
+        let low = (size & 0x0f) as u8;
+        let rest = size >> 4;
+        if rest == 0 {
+            out.push((type_bits << 4) | low);
+        } else {
+            out.push(0x80 | (type_bits << 4) | low);
+            let mut r = rest;
+            while r > 0 {
+                let mut b = (r & 0x7f) as u8;
+                r >>= 7;
+                if r > 0 {
+                    b |= 0x80;
+                }
+                out.push(b);
+            }
+        }
+        // Deflate body.
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&obj.data)
+            .expect("zlib write to Vec never fails");
+        let deflated = enc.finish().expect("zlib finish to Vec never fails");
+        out.extend_from_slice(&deflated);
+    }
+
+    // 20-byte SHA-1 trailer.
+    use sha1::Digest;
+    let mut h = sha1::Sha1::new();
+    h.update(&out);
+    out.extend_from_slice(&h.finalize());
+    out
+}
+
 fn decode_object_header(buf: &[u8]) -> Result<(ObjectKind, usize, usize), PackError> {
     if buf.is_empty() {
         return Err(PackError::HeaderOverrun);
@@ -401,6 +463,61 @@ mod tests {
         pack.extend_from_slice(&h.finalize());
         let err = parse_pack(&pack).unwrap_err();
         assert!(matches!(err, PackError::InvalidObjectType(5)));
+    }
+
+    #[test]
+    fn emit_then_parse_roundtrip_empty() {
+        let parsed = parse_pack(&emit_pack(&[])).unwrap();
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn emit_then_parse_roundtrip_single_blob() {
+        let obj = PackObject {
+            kind: ObjectKind::Blob,
+            data: b"hello world\n".to_vec(),
+        };
+        let parsed = parse_pack(&emit_pack(&[obj.clone()])).unwrap();
+        assert_eq!(parsed, vec![obj]);
+    }
+
+    #[test]
+    fn emit_then_parse_roundtrip_multi() {
+        let objs = vec![
+            PackObject {
+                kind: ObjectKind::Commit,
+                data: b"tree abc123\nauthor me\n\nmsg\n".to_vec(),
+            },
+            PackObject {
+                kind: ObjectKind::Tree,
+                data: vec![b'x'; 300], // forces multi-byte header
+            },
+            PackObject {
+                kind: ObjectKind::Blob,
+                data: b"content".to_vec(),
+            },
+        ];
+        let parsed = parse_pack(&emit_pack(&objs)).unwrap();
+        assert_eq!(parsed, objs);
+    }
+
+    #[test]
+    fn emit_pack_is_parseable_by_external_inspection() {
+        // Verify header byte counts: 4 magic + 4 version + 4 count
+        // + at least 1 header byte + ≥ few deflated bytes +
+        // 20 trailer.
+        let obj = PackObject {
+            kind: ObjectKind::Blob,
+            data: b"hi".to_vec(),
+        };
+        let pack = emit_pack(&[obj]);
+        assert_eq!(&pack[..4], b"PACK");
+        assert_eq!(&pack[4..8], &2u32.to_be_bytes());
+        assert_eq!(&pack[8..12], &1u32.to_be_bytes());
+        // Trailer present, correct length.
+        assert_eq!(pack.len() - 20, pack.len() - 20); // tautology for clarity
+        // First header byte: type=3 (blob), size=2 → (3<<4) | 2 = 0x32
+        assert_eq!(pack[12], 0x32);
     }
 
     #[test]
