@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use temper_wasm_sdk::http_stream::InboundHttp;
+use temper_wasm_sdk::http_stream::{streaming_call, InboundHttp};
 use temper_wasm_sdk::prelude::*;
 use tg_wire::{advertise_info_refs, emit_pack, encode_into, flush, AdvertisedRef, ObjectKind, PackObject, Service};
 
@@ -232,6 +232,8 @@ fn query_param(http: &InboundHttp, key: &str) -> Option<String> {
 
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const READ_CHUNK: usize = 16 * 1024;
+const OUTBOUND_READ_CHUNK: usize = 64 * 1024;
+const MAX_OBJECT_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 fn serve_upload_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
     // 1. Read request body.
@@ -401,7 +403,7 @@ fn parse_upload_request(buf: &[u8]) -> Result<UploadRequest, String> {
 }
 
 fn fetch_object_body(
-    ctx: &Context,
+    _ctx: &Context,
     kind: ObjectKind,
     sha: &str,
     _repo_id: &str,
@@ -414,17 +416,13 @@ fn fetch_object_body(
     };
     // Temper auto-assigns entity_id as a UUID; our SHA lives in the
     // `Id` field. Use $filter to look it up rather than the key URL.
-    let url = format!(
-        "{TEMPER_API}/tdata/{set}?$filter=Id%20eq%20'{sha}'"
-    );
-    let resp = ctx
-        .http_call("GET", &url, &admin_headers(), "")
-        .map_err(|e| format!("fetch {set}({sha}): {e}"))?;
-    if !(200..400).contains(&resp.status) {
-        return Err(format!("{set}({sha}) status {}", resp.status));
+    let url = format!("{TEMPER_API}/tdata/{set}?$filter=Id%20eq%20'{sha}'");
+    let (status, body) = streaming_get(&url).map_err(|e| format!("fetch {set}({sha}): {e}"))?;
+    if !(200..400).contains(&status) {
+        return Err(format!("{set}({sha}) status {status}"));
     }
     let parsed: serde_json::Value =
-        serde_json::from_str(&resp.body).map_err(|e| format!("object json: {e}"))?;
+        serde_json::from_str(&body).map_err(|e| format!("object json: {e}"))?;
     let items = parsed
         .get("value")
         .and_then(|v| v.as_array())
@@ -449,4 +447,39 @@ fn fetch_object_body(
         .position(|&b| b == 0)
         .ok_or_else(|| format!("{set}({sha}): no NUL in canonical"))?;
     Ok(canonical[nul + 1..].to_vec())
+}
+
+fn streaming_get(url: &str) -> Result<(u16, String), String> {
+    let headers = admin_headers();
+    let header_refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    let (request, mut response, head) =
+        streaming_call("GET", url, &header_refs).map_err(|e| format!("stream begin: {e}"))?;
+    request
+        .finish()
+        .map_err(|e| format!("stream request close: {e}"))?;
+    let head = head().map_err(|e| format!("stream response head: {e}"))?;
+
+    let mut body = Vec::new();
+    let mut scratch = alloc::vec![0u8; OUTBOUND_READ_CHUNK];
+    loop {
+        match response.read_next_chunk(&mut scratch) {
+            Ok(None) => break,
+            Ok(Some(n)) => {
+                if body.len() + n > MAX_OBJECT_RESPONSE_BYTES {
+                    return Err(format!(
+                        "stream response exceeds {MAX_OBJECT_RESPONSE_BYTES} bytes"
+                    ));
+                }
+                body.extend_from_slice(&scratch[..n]);
+            }
+            Err(e) => return Err(format!("stream response read: {e}")),
+        }
+    }
+
+    let body = String::from_utf8(body).map_err(|e| format!("stream response utf8: {e}"))?;
+    Ok((head.status, body))
 }
