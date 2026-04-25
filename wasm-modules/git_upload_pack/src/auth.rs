@@ -11,8 +11,7 @@
 //!
 //! Anonymous (no `Authorization` header, or token not found / not
 //! `Active`) is returned as a distinct value. The caller decides
-//! whether to reject — `git_receive_pack` does, since you can't
-//! push without a token.
+//! whether to reject or allow a development fallback.
 
 extern crate alloc;
 
@@ -80,19 +79,13 @@ impl Principal {
 
 /// Resolve the inbound caller. Falls through to anonymous on missing
 /// header, malformed Basic auth, OData lookup failure, expired or
-/// revoked token. The caller decides what to do with anonymous —
-/// receive-pack rejects it; upload-pack of a public repo will accept.
-pub fn resolve_principal(
-    ctx: &Context,
-    headers: &[(String, String)],
-) -> Principal {
+/// revoked token. The caller decides what to do with anonymous.
+pub fn resolve_principal(ctx: &Context, headers: &[(String, String)]) -> Principal {
     let Some(token) = extract_token(headers) else {
         return Principal::anonymous();
     };
     let hash = sha256_hex(token.as_bytes());
-    let url = format!(
-        "{TEMPER_API}/tdata/GitTokens?$filter=HashedSecret%20eq%20'{hash}'&$top=1"
-    );
+    let url = format!("{TEMPER_API}/tdata/GitTokens?$filter=HashedSecret%20eq%20'{hash}'&$top=1");
     let lookup_headers = Principal::system().outbound_headers();
     let resp = match ctx.http_call("GET", &url, &lookup_headers, "") {
         Ok(r) => r,
@@ -112,27 +105,35 @@ pub fn resolve_principal(
     let Some(row) = row else {
         return Principal::anonymous();
     };
-    if row.get("Status").and_then(|v| v.as_str()) != Some("Active") {
+    let fields = row.get("fields").unwrap_or(row);
+    if fields.get("Status").and_then(|v| v.as_str()) != Some("Active") {
         return Principal::anonymous();
     }
-    let id = row
+    let id = fields
         .get("PrincipalId")
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let scopes: Vec<String> = row
-        .get("Scopes")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let scopes = parse_scopes(fields.get("Scopes"));
     Principal {
         kind: "Customer".to_string(),
         id,
         scopes,
+    }
+}
+
+fn parse_scopes(value: Option<&serde_json::Value>) -> Vec<String> {
+    match value {
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|s| s.as_str().map(String::from))
+            .collect(),
+        Some(serde_json::Value::String(s)) => s
+            .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -180,10 +181,7 @@ mod tests {
     fn extracts_basic_username() {
         // base64("ghp_secret:x-oauth-basic")
         let basic = B64.encode("ghp_secret:x-oauth-basic");
-        let headers = alloc::vec![(
-            "Authorization".to_string(),
-            format!("Basic {basic}"),
-        )];
+        let headers = alloc::vec![("Authorization".to_string(), format!("Basic {basic}"),)];
         assert_eq!(extract_token(&headers).unwrap(), "ghp_secret");
     }
 
@@ -197,5 +195,11 @@ mod tests {
     fn sha256_hex_is_64_chars() {
         assert_eq!(sha256_hex(b"hello").len(), 64);
         assert!(sha256_hex(b"hello").chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn parses_scope_string() {
+        let scopes = parse_scopes(Some(&serde_json::json!("repo:read,repo:write force")));
+        assert_eq!(scopes, vec!["repo:read", "repo:write", "force"]);
     }
 }

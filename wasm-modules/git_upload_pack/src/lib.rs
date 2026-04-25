@@ -24,11 +24,11 @@ use alloc::vec::Vec;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use temper_wasm_sdk::http_stream::{streaming_call, HttpRequestBodyWriter, InboundHttp};
+use temper_wasm_sdk::http_stream::{HttpRequestBodyWriter, InboundHttp, streaming_call};
 use temper_wasm_sdk::prelude::*;
 use tg_wire::{
-    advertise_info_refs, encode_into, flush, AdvertisedRef, ObjectKind, PackEmitter,
-    Service, SidebandWriter,
+    AdvertisedRef, ObjectKind, PackEmitter, Service, SidebandWriter, advertise_info_refs,
+    encode_into, flush,
 };
 
 pub(crate) const TEMPER_API: &str = "http://127.0.0.1:3000";
@@ -99,8 +99,8 @@ fn serve_info_refs(ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
         })
         .collect();
 
-    let body = advertise_info_refs(service, &refs)
-        .map_err(|e| format!("advertise_info_refs: {e}"))?;
+    let body =
+        advertise_info_refs(service, &refs).map_err(|e| format!("advertise_info_refs: {e}"))?;
 
     http.submit_response_head(
         200,
@@ -144,12 +144,19 @@ fn fetch_refs_for_repo(
     if !(200..400).contains(&resp.status) {
         return Err(format!("fetch refs status {}", resp.status));
     }
-    let parsed: serde_json::Value = serde_json::from_str(&resp.body)
-        .map_err(|e| format!("refs parse: {e}"))?;
-    let items = parsed.get("value").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&resp.body).map_err(|e| format!("refs parse: {e}"))?;
+    let items = parsed
+        .get("value")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut rows = Vec::with_capacity(items.len());
     for row in items {
-        let fields = row.get("fields").cloned().unwrap_or(serde_json::Value::Null);
+        let fields = row
+            .get("fields")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let repo = fields
             .get("RepositoryId")
             .and_then(|v| v.as_str())
@@ -197,10 +204,7 @@ fn fetch_refs_for_repo(
 /// Resolve the inbound caller and fall back to the system principal
 /// if none is presented. Production deployments lock down via Cedar
 /// to require a real GitToken; dev quickstarts work without one.
-fn effective_principal(
-    ctx: &Context,
-    headers: &[(String, String)],
-) -> Principal {
+fn effective_principal(ctx: &Context, headers: &[(String, String)]) -> Principal {
     let resolved = auth::resolve_principal(ctx, headers);
     if resolved.is_anonymous() {
         Principal::system()
@@ -347,15 +351,34 @@ fn serve_upload_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String>
     let mut nak = Vec::new();
     encode_into(&mut nak, b"NAK\n").map_err(|e| format!("nak: {e}"))?;
     use std::io::Write;
-    writer.write_all(&nak).map_err(|e| format!("nak write: {e}"))?;
+    writer
+        .write_all(&nak)
+        .map_err(|e| format!("nak write: {e}"))?;
 
     let sideband = parsed.capabilities.iter().any(|c| c == "side-band-64k");
     let object_count = walk_order.len() as u32;
     let pack_byte_count = if sideband {
         let sb = SidebandWriter::new(&mut writer);
-        emit_pack_streaming(sb, object_count, walk_order, graph_cache, &repository_id, &principal, sideband)?
+        let (pack_byte_count, sb) = emit_pack_streaming(
+            sb,
+            object_count,
+            walk_order,
+            graph_cache,
+            &repository_id,
+            &principal,
+        )?;
+        sb.finish().map_err(|e| format!("sideband finish: {e}"))?;
+        pack_byte_count
     } else {
-        emit_pack_streaming(&mut writer, object_count, walk_order, graph_cache, &repository_id, &principal, sideband)?
+        let (pack_byte_count, _) = emit_pack_streaming(
+            &mut writer,
+            object_count,
+            walk_order,
+            graph_cache,
+            &repository_id,
+            &principal,
+        )?;
+        pack_byte_count
     };
 
     // Trailing pkt-line flush ends the response.
@@ -383,13 +406,12 @@ fn emit_pack_streaming<W: std::io::Write>(
     mut graph_cache: BTreeMap<String, Vec<u8>>,
     repository_id: &str,
     principal: &Principal,
-    sideband: bool,
-) -> Result<usize, String> {
+) -> Result<(usize, W), String> {
     // Wrap the sink in a counting writer so we can report bytes
     // written without the caller having to track them.
     let counting = CountingWriter::new(sink);
-    let mut emitter = PackEmitter::begin(counting, object_count)
-        .map_err(|e| format!("pack header: {e}"))?;
+    let mut emitter =
+        PackEmitter::begin(counting, object_count).map_err(|e| format!("pack header: {e}"))?;
 
     for (sha, kind) in walk_order {
         let body = match kind {
@@ -408,11 +430,7 @@ fn emit_pack_streaming<W: std::io::Write>(
     let counting = emitter.finish().map_err(|e| format!("pack trailer: {e}"))?;
     let pack_bytes = counting.bytes_written();
 
-    // If we wrapped in a SidebandWriter, flush its tail frame back
-    // through the body sink before returning.
-    let _final_sink = counting.into_inner();
-    let _ = sideband; // sink type already captures this; nothing else to do.
-    Ok(pack_bytes)
+    Ok((pack_bytes, counting.into_inner()))
 }
 
 /// `std::io::Write` adapter over `HttpRequestBodyWriter`. The SDK
@@ -490,10 +508,8 @@ fn parse_upload_request(buf: &[u8]) -> Result<UploadRequest, String> {
     let mut capabilities: Vec<String> = Vec::new();
     let mut i = 0usize;
     while i + 4 <= buf.len() {
-        let len_str =
-            core::str::from_utf8(&buf[i..i + 4]).map_err(|_| "pkt-line len non-utf8")?;
-        let declared =
-            usize::from_str_radix(len_str, 16).map_err(|_| "pkt-line len non-hex")?;
+        let len_str = core::str::from_utf8(&buf[i..i + 4]).map_err(|_| "pkt-line len non-utf8")?;
+        let declared = usize::from_str_radix(len_str, 16).map_err(|_| "pkt-line len non-hex")?;
         if declared == 0 {
             i += 4;
             continue; // flush between wants and haves/done
@@ -548,8 +564,8 @@ fn fetch_object_body(
     // Temper auto-assigns entity_id as a UUID; our SHA lives in the
     // `Id` field. Use $filter to look it up rather than the key URL.
     let url = format!("{TEMPER_API}/tdata/{set}?$filter=Id%20eq%20'{sha}'");
-    let (status, body) = streaming_get(principal, &url)
-        .map_err(|e| format!("fetch {set}({sha}): {e}"))?;
+    let (status, body) =
+        streaming_get(principal, &url).map_err(|e| format!("fetch {set}({sha}): {e}"))?;
     if !(200..400).contains(&status) {
         return Err(format!("{set}({sha}) status {status}"));
     }
@@ -581,10 +597,7 @@ fn fetch_object_body(
     Ok(canonical[nul + 1..].to_vec())
 }
 
-fn streaming_get(
-    principal: &Principal,
-    url: &str,
-) -> Result<(u16, String), String> {
+fn streaming_get(principal: &Principal, url: &str) -> Result<(u16, String), String> {
     let headers = principal.outbound_headers();
     let header_refs: Vec<(&str, &str)> = headers
         .iter()
