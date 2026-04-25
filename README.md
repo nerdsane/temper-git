@@ -31,16 +31,16 @@ byte-for-byte, because nothing about this experiment should require a
 human to learn a new client.
 
 Whether this is actually a better fit for Dark Factories than a
-well-configured GitHub organization is something we don't know yet. What
-we have so far is a running prototype where a real `git` client can
-push commits and clone them back, with every blob, tree, commit, and
-ref landing as a versioned entity through the same OData surface every
-other piece of state in the system uses. The hard parts — pack delta
-compression, the full GitHub REST surface, scale, policy ergonomics —
-are still ahead. If the shape is interesting to you, the quickstart
-below should get you from clone to a local end-to-end demo in a few
-minutes, and the ADRs and RFCs walk through the decisions we've made
-and haven't made.
+well-configured GitHub organization is something we don't know yet.
+What we have so far is a running prototype where a real `git` client
+can push commits and clone them back, with every blob, tree, commit,
+and ref landing as a versioned entity in the same authoritative log
+that holds every other piece of state in the system. The hard parts
+— pack delta compression, the full GitHub REST surface, scale, policy
+ergonomics — are still ahead. If the shape is interesting to you, the
+quickstart below should get you from clone to a local end-to-end demo
+in a few minutes, and the ADRs and RFCs walk through the decisions
+we've made and haven't made.
 
 ## What we're exploring
 
@@ -118,24 +118,24 @@ if it doesn't, that's a bug.
 
 Running locally end-to-end today:
 
-- `git push` of one or more commits — wire-protocol pack parsing, byte-exact
-  SHA-1 verification, every object lands as an IOA entity through OData,
-  refs advance via compare-and-swap.
-- `git clone` of populated repositories — `/info/refs` advertises real refs;
-  `git-upload-pack` walks the commit/tree/blob DAG out of entity state and
-  streams a pack-v2 response.
+- `git push` of one or more commits — every object lands as a
+  versioned entity, with byte-exact SHA-1 verification and
+  compare-and-swap on refs.
+- `git clone` of populated repositories — refs advertise, the
+  commit/tree/blob graph streams back to the client as a pack the
+  real `git` binary accepts.
 - `git ls-remote` against empty and populated repositories.
-- Byte-exact git-object canonicalization verified against real `git` output.
-- pkt-line framing, advertisement builder, pack-v2 parser + emitter, and
-  receive-pack command-list parser, all parity-verified against the real
-  `git` binary.
+- Byte-exact serialization parity with the real `git` binary, tested
+  against its output on every commit.
 
 In flight (roadmap in
 [`docs/rfc/0002-push-and-clone.md`](docs/rfc/0002-push-and-clone.md)):
 
-- Pack delta compression (OFS_DELTA / REF_DELTA). v0 emits non-delta packs.
+- Pack delta compression. The current build sends one full object per
+  pack entry, which is correct but ~5× larger on the wire than git's
+  default.
 - Push-to-create semantics for new repositories.
-- Hooks (pre-receive, post-receive).
+- Server-side hooks (pre-receive, post-receive).
 
 ## Quickstart (local)
 
@@ -149,7 +149,9 @@ cd temper-git
 # 2. Run the host-side tests (pure-Rust libraries — no kernel).
 cargo test
 
-# 3. Build the WASM integrations.
+# 3. Build the protocol handlers (sandboxed, deployed alongside the
+#    kernel). They compile to wasm32-wasip1 because that's how Temper
+#    runs sandboxed code; nothing about the wire protocol cares.
 rustup target add wasm32-wasip1
 cargo build -p git_upload_pack -p git_receive_pack \
   --target wasm32-wasip1 --release
@@ -236,7 +238,7 @@ temper-git/
 ├── policies/              # authorization policies per entity
 ├── canonical/             # byte-exact git-object serialization + SHA-1
 ├── wire/                  # pkt-line + advertisement + pack-v2 parser/emitter
-├── wasm-modules/          # protocol handlers compiled to WASM
+├── wasm-modules/          # protocol handlers (sandboxed wasm32-wasip1)
 │   ├── git_upload_pack/   # /info/refs + git-upload-pack (clone)
 │   └── git_receive_pack/  # /info/refs + git-receive-pack (push)
 └── temper/                # kernel submodule

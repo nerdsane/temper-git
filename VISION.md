@@ -16,10 +16,10 @@ replayable.
 Whether this is actually a better fit than a well-configured GitHub
 organization is something I don't know yet. A real `git` client can
 push commits and clone them back today, with every object landing as
-a versioned entity through the same OData surface every other piece
-of state in the system uses. The hard parts — pack delta compression,
-the full GitHub REST surface, scale, policy ergonomics — are still
-ahead.
+a versioned entity in the same authoritative log that holds every
+other piece of state in the system. The hard parts — pack delta
+compression, the full GitHub REST surface, scale, policy ergonomics —
+are still ahead.
 
 ## Why bother
 
