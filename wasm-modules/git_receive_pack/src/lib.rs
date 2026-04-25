@@ -46,9 +46,12 @@ use tg_wire::{
 
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 const READ_CHUNK_BYTES: usize = 16 * 1024;
-const TEMPER_API: &str = "http://127.0.0.1:3000";
-const SYSTEM_TENANT: &str = "default";
-const SYSTEM_PRINCIPAL: &str = "git-receive-pack";
+pub(crate) const TEMPER_API: &str = "http://127.0.0.1:3000";
+pub(crate) const SYSTEM_TENANT: &str = "default";
+pub(crate) const SYSTEM_PRINCIPAL: &str = "git-receive-pack";
+
+mod auth;
+pub(crate) use auth::Principal;
 
 temper_module! {
     fn run(ctx: Context) -> Result<Value> {
@@ -118,6 +121,20 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
     let repo = http.params.get("repo").cloned().unwrap_or_default();
     let repository_id = format!("rp-{owner}-{repo}");
 
+    // Resolve the inbound caller from the Authorization header. A
+    // real bearer/Basic token whose hash matches an Active GitToken
+    // returns that token's PrincipalId + Scopes; otherwise we fall
+    // through to the system principal for backward-compat with
+    // un-tokenised dev setups. Production deployments tighten via
+    // Cedar, which then gates write actions on the real Customer/
+    // Agent principal rather than always permitting Admin.
+    let resolved = auth::resolve_principal(ctx, &http.headers);
+    let principal = if resolved.is_anonymous() {
+        Principal::system()
+    } else {
+        resolved
+    };
+
     // Attempt to persist every object. We report a single
     // "unpack ok" or "unpack <reason>" based on whether ALL
     // object writes succeeded.
@@ -141,7 +158,7 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
         let row = build_object_row(obj.kind, &sha, &repository_id, &obj.data, &canonical);
         let url = format!("{TEMPER_API}/tdata/{entity_set}");
         let body_json = row.to_string();
-        match post_json(ctx, &url, &body_json) {
+        match post_json(ctx, &principal, &url, &body_json) {
             Ok(resp) if (200..400).contains(&resp.status) => {}
             Ok(resp) => {
                 // 409 is idempotent success (object already stored).
@@ -164,7 +181,7 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
         let result = if !per_obj_errors.is_empty() {
             Err(alloc::format!("object write failures: {}", per_obj_errors.len()))
         } else {
-            apply_ref_command(ctx, &repository_id, cmd)
+            apply_ref_command(ctx, &principal, &repository_id, cmd)
         };
         ref_statuses.push((cmd.refname.clone(), result));
     }
@@ -231,30 +248,18 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
     }))
 }
 
-/// Headers used for internal OData calls. Currently all calls go
-/// through a system principal; #3 in the gap list will swap this
-/// for a real `GitToken`-derived principal once auth resolution
-/// lands.
-fn system_headers() -> Vec<(String, String)> {
-    alloc::vec![
-        ("X-Tenant-Id".to_string(), SYSTEM_TENANT.to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "Admin".to_string()),
-        ("X-Temper-Principal-Id".to_string(), SYSTEM_PRINCIPAL.to_string()),
-        ("X-Temper-Agent-Type".to_string(), "system".to_string()),
-        ("Content-Type".to_string(), "application/json".to_string()),
-    ]
-}
-
 fn post_json(
     ctx: &Context,
+    principal: &Principal,
     url: &str,
     body: &str,
 ) -> Result<temper_wasm_sdk::HttpResponse, String> {
-    ctx.http_call("POST", url, &system_headers(), body)
+    ctx.http_call("POST", url, &principal.outbound_headers(), body)
 }
 
 fn apply_ref_command(
     ctx: &Context,
+    principal: &Principal,
     repository_id: &str,
     cmd: &tg_wire::RefCommand,
 ) -> Result<(), String> {
@@ -270,14 +275,11 @@ fn apply_ref_command(
                 "UpdatedAt": "1970-01-01T00:00:00Z",
             });
             let url = format!("{TEMPER_API}/tdata/Refs");
-            let resp = post_json(ctx, &url, &row.to_string())?;
+            let resp = post_json(ctx, principal, &url, &row.to_string())?;
             if !(200..400).contains(&resp.status) {
                 return Err(format!("ref create status {}", resp.status));
             }
-            // New ref might already be the source of an open PR
-            // (rare on Create, but possible if a ref was deleted +
-            // recreated). Flow PR head updates the same way.
-            propagate_to_open_prs(ctx, repository_id, &cmd.refname, &cmd.new_sha)?;
+            propagate_to_open_prs(ctx, principal, repository_id, &cmd.refname, &cmd.new_sha)?;
             Ok(())
         }
         CommandKind::Update => {
@@ -292,11 +294,11 @@ fn apply_ref_command(
                 "NewCommitSha": cmd.new_sha,
             });
             let url = format!("{TEMPER_API}/tdata/Refs('{ref_id}')/Temper.Update");
-            let resp = post_json(ctx, &url, &body.to_string())?;
+            let resp = post_json(ctx, principal, &url, &body.to_string())?;
             if !(200..400).contains(&resp.status) {
                 return Err(format!("ref update status {}", resp.status));
             }
-            propagate_to_open_prs(ctx, repository_id, &cmd.refname, &cmd.new_sha)?;
+            propagate_to_open_prs(ctx, principal, repository_id, &cmd.refname, &cmd.new_sha)?;
             Ok(())
         }
         CommandKind::Delete => {
@@ -316,6 +318,7 @@ fn ref_id_for(repository_id: &str, refname: &str) -> String {
 /// push (the ref advance itself already succeeded).
 fn propagate_to_open_prs(
     ctx: &Context,
+    principal: &Principal,
     repository_id: &str,
     refname: &str,
     new_head: &str,
@@ -329,8 +332,8 @@ fn propagate_to_open_prs(
         "{TEMPER_API}/tdata/PullRequests?$filter={}&$select=Id",
         urlencode(&filter)
     );
-    let headers = system_headers();
-    let resp = ctx.http_call("GET", &url, &headers, "")
+    let resp = ctx
+        .http_call("GET", &url, &principal.outbound_headers(), "")
         .map_err(|e| format!("PR lookup: {e}"))?;
     if !(200..400).contains(&resp.status) {
         // Non-fatal: surface in logs, keep the push successful.
@@ -351,7 +354,7 @@ fn propagate_to_open_prs(
         let url = format!(
             "{TEMPER_API}/tdata/PullRequests('{pr_id}')/Temper.UpdateHead"
         );
-        let _ = post_json(ctx, &url, &body.to_string());
+        let _ = post_json(ctx, principal, &url, &body.to_string());
     }
     Ok(())
 }

@@ -17,6 +17,7 @@ tg-wire = { path = "../../wire" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false }
 
 [profile.release]
 opt-level = "s"

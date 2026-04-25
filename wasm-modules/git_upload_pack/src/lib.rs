@@ -31,9 +31,12 @@ use tg_wire::{
     Service, SidebandWriter,
 };
 
-const TEMPER_API: &str = "http://127.0.0.1:3000";
-const SYSTEM_TENANT: &str = "default";
-const SYSTEM_PRINCIPAL: &str = "git-upload-pack";
+pub(crate) const TEMPER_API: &str = "http://127.0.0.1:3000";
+pub(crate) const SYSTEM_TENANT: &str = "default";
+pub(crate) const SYSTEM_PRINCIPAL: &str = "git-upload-pack";
+
+mod auth;
+pub(crate) use auth::Principal;
 
 temper_module! {
     fn run(ctx: Context) -> Result<Value> {
@@ -76,10 +79,12 @@ fn serve_info_refs(ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
     let repo = http.params.get("repo").cloned().unwrap_or_default();
     let repository_id = format!("rp-{owner}-{repo}");
 
+    let principal = effective_principal(ctx, &http.headers);
+
     // Query /tdata/Refs and filter client-side on RepositoryId. We
     // don't assume $filter support yet; the payload is small enough
     // (tens of refs typical) that full-list-then-filter is fine.
-    let refs_rows = fetch_refs_for_repo(ctx, &repository_id)?;
+    let refs_rows = fetch_refs_for_repo(ctx, &principal, &repository_id)?;
 
     let owned: Vec<(String, String)> = refs_rows
         .into_iter()
@@ -129,16 +134,12 @@ struct RefRow {
 
 fn fetch_refs_for_repo(
     ctx: &Context,
+    principal: &Principal,
     repository_id: &str,
 ) -> Result<Vec<RefRow>, String> {
     let url = format!("{TEMPER_API}/tdata/Refs");
     let resp = ctx
-        .http_call(
-            "GET",
-            &url,
-            &admin_headers(),
-            "",
-        )
+        .http_call("GET", &url, &principal.outbound_headers(), "")
         .map_err(|e| format!("fetch refs: {e}"))?;
     if !(200..400).contains(&resp.status) {
         return Err(format!("fetch refs status {}", resp.status));
@@ -193,13 +194,19 @@ fn fetch_refs_for_repo(
     Ok(rows)
 }
 
-fn admin_headers() -> Vec<(String, String)> {
-    alloc::vec![
-        ("X-Tenant-Id".to_string(), SYSTEM_TENANT.to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "Admin".to_string()),
-        ("X-Temper-Principal-Id".to_string(), SYSTEM_PRINCIPAL.to_string()),
-        ("X-Temper-Agent-Type".to_string(), "system".to_string()),
-    ]
+/// Resolve the inbound caller and fall back to the system principal
+/// if none is presented. Production deployments lock down via Cedar
+/// to require a real GitToken; dev quickstarts work without one.
+fn effective_principal(
+    ctx: &Context,
+    headers: &[(String, String)],
+) -> Principal {
+    let resolved = auth::resolve_principal(ctx, headers);
+    if resolved.is_anonymous() {
+        Principal::system()
+    } else {
+        resolved
+    }
 }
 
 fn respond_text(
@@ -238,7 +245,8 @@ const READ_CHUNK: usize = 16 * 1024;
 const OUTBOUND_READ_CHUNK: usize = 64 * 1024;
 const MAX_OBJECT_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
-fn serve_upload_pack(_ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
+fn serve_upload_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
+    let principal = effective_principal(ctx, &http.headers);
     // 1. Read the request body. Bounded: want/have negotiation
     //    payloads are tiny (a few KB even for huge repos), so we
     //    cap at 16 MiB and buffer.
@@ -285,7 +293,7 @@ fn serve_upload_pack(_ctx: &Context, http: &InboundHttp) -> Result<Value, String
         }
         match kind {
             ObjectKind::Commit | ObjectKind::Tree => {
-                let raw_body = fetch_object_body(kind, &sha, &repository_id)?;
+                let raw_body = fetch_object_body(&principal, kind, &sha, &repository_id)?;
                 if matches!(kind, ObjectKind::Commit) {
                     let refs = tg_canonical::parse_commit_refs(&raw_body)
                         .map_err(|e| format!("commit {sha}: {e}"))?;
@@ -345,9 +353,9 @@ fn serve_upload_pack(_ctx: &Context, http: &InboundHttp) -> Result<Value, String
     let object_count = walk_order.len() as u32;
     let pack_byte_count = if sideband {
         let sb = SidebandWriter::new(&mut writer);
-        emit_pack_streaming(sb, object_count, walk_order, graph_cache, &repository_id, sideband)?
+        emit_pack_streaming(sb, object_count, walk_order, graph_cache, &repository_id, &principal, sideband)?
     } else {
-        emit_pack_streaming(&mut writer, object_count, walk_order, graph_cache, &repository_id, sideband)?
+        emit_pack_streaming(&mut writer, object_count, walk_order, graph_cache, &repository_id, &principal, sideband)?
     };
 
     // Trailing pkt-line flush ends the response.
@@ -374,6 +382,7 @@ fn emit_pack_streaming<W: std::io::Write>(
     walk_order: Vec<(String, ObjectKind)>,
     mut graph_cache: BTreeMap<String, Vec<u8>>,
     repository_id: &str,
+    principal: &Principal,
     sideband: bool,
 ) -> Result<usize, String> {
     // Wrap the sink in a counting writer so we can report bytes
@@ -388,7 +397,7 @@ fn emit_pack_streaming<W: std::io::Write>(
                 .remove(&sha)
                 .ok_or_else(|| format!("walk-cache miss for {sha}"))?,
             ObjectKind::Blob | ObjectKind::Tag => {
-                fetch_object_body(kind, &sha, repository_id)?
+                fetch_object_body(principal, kind, &sha, repository_id)?
             }
         };
         emitter
@@ -525,6 +534,7 @@ fn parse_upload_request(buf: &[u8]) -> Result<UploadRequest, String> {
 }
 
 fn fetch_object_body(
+    principal: &Principal,
     kind: ObjectKind,
     sha: &str,
     _repo_id: &str,
@@ -538,7 +548,8 @@ fn fetch_object_body(
     // Temper auto-assigns entity_id as a UUID; our SHA lives in the
     // `Id` field. Use $filter to look it up rather than the key URL.
     let url = format!("{TEMPER_API}/tdata/{set}?$filter=Id%20eq%20'{sha}'");
-    let (status, body) = streaming_get(&url).map_err(|e| format!("fetch {set}({sha}): {e}"))?;
+    let (status, body) = streaming_get(principal, &url)
+        .map_err(|e| format!("fetch {set}({sha}): {e}"))?;
     if !(200..400).contains(&status) {
         return Err(format!("{set}({sha}) status {status}"));
     }
@@ -570,8 +581,11 @@ fn fetch_object_body(
     Ok(canonical[nul + 1..].to_vec())
 }
 
-fn streaming_get(url: &str) -> Result<(u16, String), String> {
-    let headers = admin_headers();
+fn streaming_get(
+    principal: &Principal,
+    url: &str,
+) -> Result<(u16, String), String> {
+    let headers = principal.outbound_headers();
     let header_refs: Vec<(&str, &str)> = headers
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
