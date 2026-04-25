@@ -45,6 +45,157 @@ pub fn parse_commit_refs(body: &[u8]) -> Result<CommitRefs, &'static str> {
     Ok(CommitRefs { tree, parents })
 }
 
+/// Fully decoded commit: every header field plus the message.
+///
+/// `gpg_signature` is `Some` iff the commit had a `gpgsig` header.
+/// Continuation lines (the multi-line PGP body) are joined back into
+/// the original byte sequence with `\n ` markers stripped, so the
+/// returned signature is the bare PEM block. Callers that need to
+/// re-emit a canonical commit should keep the original bytes via
+/// `CanonicalBytes`; this is for OData metadata fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedCommit {
+    pub tree: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub committer: String,
+    pub message: String,
+    pub gpg_signature: Option<String>,
+}
+
+/// Full commit parse: extracts every metadata field needed to populate
+/// the OData `Commit` row.
+pub fn parse_commit(body: &[u8]) -> Result<ParsedCommit, &'static str> {
+    let text = core::str::from_utf8(body).map_err(|_| "commit body not UTF-8")?;
+
+    // Headers end at the first empty line; everything after is the
+    // message. Track byte offset so the message can include any
+    // newlines verbatim.
+    let blank = find_blank_header_line(text).ok_or("commit missing blank line")?;
+    let (header_block, message_block) = text.split_at(blank);
+    // message_block starts with the blank "\n\n" or "\n"; strip the
+    // single header-terminating newline so the message itself starts
+    // cleanly.
+    let message = message_block.strip_prefix("\n\n").unwrap_or(
+        message_block.strip_prefix('\n').unwrap_or(message_block),
+    );
+
+    let headers = collect_headers(header_block);
+    let mut tree: Option<String> = None;
+    let mut parents: Vec<String> = Vec::new();
+    let mut author: Option<String> = None;
+    let mut committer: Option<String> = None;
+    let mut gpg_signature: Option<String> = None;
+
+    for (key, value) in headers {
+        match key {
+            "tree" => tree = Some(value),
+            "parent" => parents.push(value),
+            "author" => author = Some(value),
+            "committer" => committer = Some(value),
+            "gpgsig" => gpg_signature = Some(value),
+            _ => {}
+        }
+    }
+
+    Ok(ParsedCommit {
+        tree: tree.ok_or("commit missing tree")?,
+        parents,
+        author: author.ok_or("commit missing author")?,
+        committer: committer.ok_or("commit missing committer")?,
+        message: message.to_string(),
+        gpg_signature,
+    })
+}
+
+/// Fully decoded annotated tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedTag {
+    pub object: String,
+    pub target_type: String,
+    pub tag: String,
+    pub tagger: String,
+    pub message: String,
+    pub gpg_signature: Option<String>,
+}
+
+/// Parse an annotated tag's body bytes (without the `tag <len>\0`
+/// header prefix).
+pub fn parse_tag(body: &[u8]) -> Result<ParsedTag, &'static str> {
+    let text = core::str::from_utf8(body).map_err(|_| "tag body not UTF-8")?;
+    let blank = find_blank_header_line(text).ok_or("tag missing blank line")?;
+    let (header_block, message_block) = text.split_at(blank);
+    let message = message_block.strip_prefix("\n\n").unwrap_or(
+        message_block.strip_prefix('\n').unwrap_or(message_block),
+    );
+
+    let mut object: Option<String> = None;
+    let mut target_type: Option<String> = None;
+    let mut tag: Option<String> = None;
+    let mut tagger: Option<String> = None;
+    let mut gpg_signature: Option<String> = None;
+
+    for (key, value) in collect_headers(header_block) {
+        match key {
+            "object" => object = Some(value),
+            "type" => target_type = Some(value),
+            "tag" => tag = Some(value),
+            "tagger" => tagger = Some(value),
+            "gpgsig" => gpg_signature = Some(value),
+            _ => {}
+        }
+    }
+
+    Ok(ParsedTag {
+        object: object.ok_or("tag missing object")?,
+        target_type: target_type.ok_or("tag missing type")?,
+        tag: tag.ok_or("tag missing tag")?,
+        tagger: tagger.ok_or("tag missing tagger")?,
+        message: message.to_string(),
+        gpg_signature,
+    })
+}
+
+/// Find the byte offset of the blank line that separates headers
+/// from the message. Returns the offset of the `\n` that is
+/// immediately followed by another `\n`, or `None` if no such pair.
+fn find_blank_header_line(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'\n' && bytes[i + 1] == b'\n' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Walk header lines, joining continuation lines (those starting
+/// with a single space) back into their owning header value. Returns
+/// `(key, value)` pairs in the order they appeared.
+fn collect_headers(header_block: &str) -> Vec<(&str, String)> {
+    let mut out: Vec<(&str, String)> = Vec::new();
+    for line in header_block.split('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix(' ') {
+            // Continuation of the prior header (PGP body).
+            if let Some((_, value)) = out.last_mut() {
+                value.push('\n');
+                value.push_str(rest);
+            }
+            continue;
+        }
+        match line.split_once(' ') {
+            Some((key, value)) => out.push((key, value.to_string())),
+            None => out.push((line, String::new())),
+        }
+    }
+    out
+}
+
 /// One entry in a tree — mode + name + child SHA (and whether that
 /// child is itself a tree, from the mode bits).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,5 +359,78 @@ mod tests {
         body.extend_from_slice(b"100644 README\0");
         body.extend_from_slice(&[0u8; 10]); // only 10 bytes instead of 20
         assert!(parse_tree(&body).is_err());
+    }
+
+    #[test]
+    fn parse_commit_full_extracts_metadata() {
+        let body = b"tree 7d4a466af82cd6857c85c0296d5c23fc68cba887\n\
+                     parent 3a21d1d7f95fda510925f0e5e2566abf137fb490\n\
+                     author Alice <alice@example.com> 1700000000 +0000\n\
+                     committer Bob <bob@example.com> 1700000100 -0500\n\
+                     \n\
+                     fix the bug\n\nlonger explanation here\n";
+        let c = parse_commit(body).unwrap();
+        assert_eq!(c.tree, "7d4a466af82cd6857c85c0296d5c23fc68cba887");
+        assert_eq!(c.parents, vec!["3a21d1d7f95fda510925f0e5e2566abf137fb490"]);
+        assert_eq!(c.author, "Alice <alice@example.com> 1700000000 +0000");
+        assert_eq!(c.committer, "Bob <bob@example.com> 1700000100 -0500");
+        assert_eq!(c.message, "fix the bug\n\nlonger explanation here\n");
+        assert!(c.gpg_signature.is_none());
+    }
+
+    #[test]
+    fn parse_commit_full_handles_merge() {
+        let body = b"tree ffffffffffffffffffffffffffffffffffffffff\n\
+                     parent 1111111111111111111111111111111111111111\n\
+                     parent 2222222222222222222222222222222222222222\n\
+                     author T <t@x> 0 +0000\n\
+                     committer T <t@x> 0 +0000\n\
+                     \n\
+                     merge branch foo\n";
+        let c = parse_commit(body).unwrap();
+        assert_eq!(c.parents.len(), 2);
+        assert_eq!(c.message, "merge branch foo\n");
+    }
+
+    #[test]
+    fn parse_commit_full_recovers_gpg_signature() {
+        // gpgsig is multi-line; continuation lines start with a
+        // single space which we strip.
+        let body = b"tree aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
+                     author T <t@x> 0 +0000\n\
+                     committer T <t@x> 0 +0000\n\
+                     gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQ123\n -----END PGP SIGNATURE-----\n\
+                     \n\
+                     signed commit\n";
+        let c = parse_commit(body).unwrap();
+        let sig = c.gpg_signature.expect("gpg signature present");
+        assert!(sig.starts_with("-----BEGIN PGP SIGNATURE-----"));
+        assert!(sig.ends_with("-----END PGP SIGNATURE-----"));
+        assert!(sig.contains("iQ123"));
+    }
+
+    #[test]
+    fn parse_tag_extracts_metadata() {
+        let body = b"object 1234567890123456789012345678901234567890\n\
+                     type commit\n\
+                     tag v0.1.0\n\
+                     tagger Releaser <r@x> 1700000000 +0000\n\
+                     \n\
+                     Release notes\n";
+        let t = parse_tag(body).unwrap();
+        assert_eq!(t.object, "1234567890123456789012345678901234567890");
+        assert_eq!(t.target_type, "commit");
+        assert_eq!(t.tag, "v0.1.0");
+        assert_eq!(t.tagger, "Releaser <r@x> 1700000000 +0000");
+        assert_eq!(t.message, "Release notes\n");
+    }
+
+    #[test]
+    fn parse_commit_rejects_missing_tree() {
+        let body = b"author T <t@x> 0 +0000\n\
+                     committer T <t@x> 0 +0000\n\
+                     \n\
+                     no tree\n";
+        assert!(parse_commit(body).is_err());
     }
 }

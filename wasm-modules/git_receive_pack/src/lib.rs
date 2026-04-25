@@ -231,37 +231,26 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
     }))
 }
 
-/// POST a JSON body to the temper-git OData API, injecting the
-/// system principal headers.
+/// Headers used for internal OData calls. Currently all calls go
+/// through a system principal; #3 in the gap list will swap this
+/// for a real `GitToken`-derived principal once auth resolution
+/// lands.
+fn system_headers() -> Vec<(String, String)> {
+    alloc::vec![
+        ("X-Tenant-Id".to_string(), SYSTEM_TENANT.to_string()),
+        ("X-Temper-Principal-Kind".to_string(), "Admin".to_string()),
+        ("X-Temper-Principal-Id".to_string(), SYSTEM_PRINCIPAL.to_string()),
+        ("X-Temper-Agent-Type".to_string(), "system".to_string()),
+        ("Content-Type".to_string(), "application/json".to_string()),
+    ]
+}
+
 fn post_json(
     ctx: &Context,
     url: &str,
     body: &str,
 ) -> Result<temper_wasm_sdk::HttpResponse, String> {
-    let headers: Vec<(String, String)> = alloc::vec![
-        ("X-Tenant-Id".to_string(), SYSTEM_TENANT.to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "Admin".to_string()),
-        ("X-Temper-Principal-Id".to_string(), SYSTEM_PRINCIPAL.to_string()),
-        ("X-Temper-Agent-Type".to_string(), "system".to_string()),
-        ("Content-Type".to_string(), "application/json".to_string()),
-    ];
-    ctx.http_call("POST", url, &headers, body)
-}
-
-/// PATCH the same way.
-fn patch_json(
-    ctx: &Context,
-    url: &str,
-    body: &str,
-) -> Result<temper_wasm_sdk::HttpResponse, String> {
-    let headers: Vec<(String, String)> = alloc::vec![
-        ("X-Tenant-Id".to_string(), SYSTEM_TENANT.to_string()),
-        ("X-Temper-Principal-Kind".to_string(), "Admin".to_string()),
-        ("X-Temper-Principal-Id".to_string(), SYSTEM_PRINCIPAL.to_string()),
-        ("X-Temper-Agent-Type".to_string(), "system".to_string()),
-        ("Content-Type".to_string(), "application/json".to_string()),
-    ];
-    ctx.http_call("PATCH", url, &headers, body)
+    ctx.http_call("POST", url, &system_headers(), body)
 }
 
 fn apply_ref_command(
@@ -272,7 +261,7 @@ fn apply_ref_command(
     match cmd.kind() {
         CommandKind::Create => {
             let row = json!({
-                "Id": format!("rf-{}-{}", repository_id, cmd.refname.replace('/', "-")),
+                "Id": ref_id_for(repository_id, &cmd.refname),
                 "RepositoryId": repository_id,
                 "Name": cmd.refname,
                 "TargetCommitSha": cmd.new_sha,
@@ -285,25 +274,93 @@ fn apply_ref_command(
             if !(200..400).contains(&resp.status) {
                 return Err(format!("ref create status {}", resp.status));
             }
+            // New ref might already be the source of an open PR
+            // (rare on Create, but possible if a ref was deleted +
+            // recreated). Flow PR head updates the same way.
+            propagate_to_open_prs(ctx, repository_id, &cmd.refname, &cmd.new_sha)?;
             Ok(())
         }
         CommandKind::Update => {
-            let ref_id = format!("rf-{}-{}", repository_id, cmd.refname.replace('/', "-"));
-            let patch = json!({
-                "TargetCommitSha": cmd.new_sha,
-                "ExpectedOldSha": cmd.old_sha,
+            // Use the spec's `Update` action with compare-and-swap on
+            // PreviousCommitSha rather than a generic PATCH. This
+            // routes the change through the entity's state machine
+            // so any [[integration]] triggers (webhooks, projection
+            // rebuilds, …) fire on the canonical event.
+            let ref_id = ref_id_for(repository_id, &cmd.refname);
+            let body = json!({
+                "PreviousCommitSha": cmd.old_sha,
+                "NewCommitSha": cmd.new_sha,
             });
-            let url = format!("{TEMPER_API}/tdata/Refs('{ref_id}')");
-            let resp = patch_json(ctx, &url, &patch.to_string())?;
+            let url = format!("{TEMPER_API}/tdata/Refs('{ref_id}')/Temper.Update");
+            let resp = post_json(ctx, &url, &body.to_string())?;
             if !(200..400).contains(&resp.status) {
                 return Err(format!("ref update status {}", resp.status));
             }
+            propagate_to_open_prs(ctx, repository_id, &cmd.refname, &cmd.new_sha)?;
             Ok(())
         }
         CommandKind::Delete => {
             Err("ref delete not implemented".to_string())
         }
     }
+}
+
+fn ref_id_for(repository_id: &str, refname: &str) -> String {
+    format!("rf-{}-{}", repository_id, refname.replace('/', "-"))
+}
+
+/// After a ref advances, fire `PullRequest.UpdateHead` on every PR
+/// whose `SourceRef` matches. This is the wire-side hook that keeps
+/// PR head SHAs current as new commits land. Non-fatal: a PR lookup
+/// or update failure is logged in the response but doesn't fail the
+/// push (the ref advance itself already succeeded).
+fn propagate_to_open_prs(
+    ctx: &Context,
+    repository_id: &str,
+    refname: &str,
+    new_head: &str,
+) -> Result<(), String> {
+    let filter = format!(
+        "RepositoryId eq '{repository_id}' and SourceRef eq '{refname}' \
+         and (State eq 'Open' or State eq 'UnderReview' \
+              or State eq 'ChangesRequested' or State eq 'Approved')"
+    );
+    let url = format!(
+        "{TEMPER_API}/tdata/PullRequests?$filter={}&$select=Id",
+        urlencode(&filter)
+    );
+    let headers = system_headers();
+    let resp = ctx.http_call("GET", &url, &headers, "")
+        .map_err(|e| format!("PR lookup: {e}"))?;
+    if !(200..400).contains(&resp.status) {
+        // Non-fatal: surface in logs, keep the push successful.
+        return Ok(());
+    }
+    let parsed: Value = match serde_json::from_str(&resp.body) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let Some(items) = parsed.get("value").and_then(|v| v.as_array()) else {
+        return Ok(());
+    };
+    for item in items {
+        let Some(pr_id) = item.get("Id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let body = json!({ "NewHeadCommitSha": new_head });
+        let url = format!(
+            "{TEMPER_API}/tdata/PullRequests('{pr_id}')/Temper.UpdateHead"
+        );
+        let _ = post_json(ctx, &url, &body.to_string());
+    }
+    Ok(())
+}
+
+fn urlencode(s: &str) -> String {
+    // Minimal: encode only the characters that break OData $filter
+    // through curl/axum. Spaces and quotes are the main ones; full
+    // percent-encoding is deferred until we hit a case that needs it.
+    s.replace(' ', "%20").replace('\'', "%27")
 }
 
 fn build_object_row(
@@ -333,33 +390,69 @@ fn build_object_row(
             "CreatedAt": created_at,
         }),
         pack::ObjectKind::Commit => {
-            // v0: don't parse the commit body; leave metadata fields
-            // blank. Next slice does the parse via tg-canonical.
-            json!({
+            // Best-effort metadata extraction: a malformed commit
+            // shouldn't fail the push (the canonical bytes already
+            // round-trip; the OData fields are derived). Null out
+            // metadata if the parser can't find what it needs.
+            let parsed = tg_canonical::parse_commit(raw).ok();
+            let (tree, parents, author, committer, message, gpg) = match &parsed {
+                Some(c) => (
+                    c.tree.clone(),
+                    c.parents.join(","),
+                    c.author.clone(),
+                    c.committer.clone(),
+                    c.message.clone(),
+                    c.gpg_signature.clone(),
+                ),
+                None => Default::default(),
+            };
+            let mut row = json!({
                 "Id": sha,
                 "RepositoryId": repository_id,
-                "TreeSha": "",
-                "ParentShas": "",
-                "Author": "",
-                "Committer": "",
-                "Message": "",
+                "TreeSha": tree,
+                "ParentShas": parents,
+                "Author": author,
+                "Committer": committer,
+                "Message": message,
                 "CanonicalBytes": canonical_b64,
                 "Status": "Durable",
                 "CreatedAt": created_at,
-            })
+            });
+            if let Some(sig) = gpg {
+                row["PgpSignature"] = Value::String(sig);
+            }
+            row
         }
-        pack::ObjectKind::Tag => json!({
-            "Id": sha,
-            "RepositoryId": repository_id,
-            "TargetSha": "",
-            "TargetType": "",
-            "TagName": "",
-            "Tagger": "",
-            "Message": "",
-            "CanonicalBytes": canonical_b64,
-            "Status": "Durable",
-            "CreatedAt": created_at,
-        }),
+        pack::ObjectKind::Tag => {
+            let parsed = tg_canonical::parse_tag(raw).ok();
+            let (target, ttype, name, tagger, message, gpg) = match &parsed {
+                Some(t) => (
+                    t.object.clone(),
+                    t.target_type.clone(),
+                    t.tag.clone(),
+                    t.tagger.clone(),
+                    t.message.clone(),
+                    t.gpg_signature.clone(),
+                ),
+                None => Default::default(),
+            };
+            let mut row = json!({
+                "Id": sha,
+                "RepositoryId": repository_id,
+                "TargetSha": target,
+                "TargetType": ttype,
+                "TagName": name,
+                "Tagger": tagger,
+                "Message": message,
+                "CanonicalBytes": canonical_b64,
+                "Status": "Durable",
+                "CreatedAt": created_at,
+            });
+            if let Some(sig) = gpg {
+                row["PgpSignature"] = Value::String(sig);
+            }
+            row
+        }
     }
 }
 
