@@ -156,16 +156,34 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
         .next_object()
         .map_err(|e| format!("pack next: {e}"))?
     {
+        // Blobs go through the streaming-binary `Temper.IngestRaw`
+        // endpoint: the body is sent as raw octets and the kernel
+        // computes the SHA + persists the row, so we skip the
+        // base64+JSON round-trip that costs ~2.6× the body size on
+        // both sides.
+        if matches!(obj.kind, pack::ObjectKind::Blob) {
+            match ingest_blob_streaming(&principal, &repository_id, &obj.data) {
+                Ok(_) => {}
+                Err(e) => {
+                    unpack_status = format!("error ingesting blob: {e}");
+                    per_obj_errors.push(format!("blob:{e}"));
+                }
+            }
+            object_count += 1;
+            continue;
+        }
+
+        // Tree / Commit / Tag stay on the JSON path. They're small
+        // (typically a few hundred bytes), and Commit + Tag rows
+        // need parsed metadata fields anyway, so the existing
+        // `build_object_row` flow is the right shape.
         let (kind_prefix, entity_set) = match obj.kind {
-            pack::ObjectKind::Blob => ("blob", "Blobs"),
             pack::ObjectKind::Tree => ("tree", "Trees"),
             pack::ObjectKind::Commit => ("commit", "Commits"),
             pack::ObjectKind::Tag => ("tag", "Tags"),
+            pack::ObjectKind::Blob => unreachable!("blob handled above"),
         };
-        let sha = match obj.kind {
-            pack::ObjectKind::Blob => tg_canonical::blob_hash(&obj.data),
-            _ => sha_from_prefix(kind_prefix, &obj.data),
-        };
+        let sha = sha_from_prefix(kind_prefix, &obj.data);
         let mut canonical = format!("{} {}\0", kind_prefix, obj.data.len()).into_bytes();
         canonical.extend_from_slice(&obj.data);
 
@@ -277,6 +295,71 @@ fn post_json(
     body: &str,
 ) -> Result<temper_wasm_sdk::HttpResponse, String> {
     ctx.http_call("POST", url, &principal.outbound_headers(), body)
+}
+
+/// Stream a raw blob body to the kernel via `POST
+/// /tdata/Blobs/Temper.IngestRaw`. Bytes go out as octet-stream
+/// chunks, the kernel computes the SHA-1 + persists the row, and
+/// returns the row Id. Avoids the 2.6× heap blowup of the JSON +
+/// base64 encoding the standard OData POST would require.
+fn ingest_blob_streaming(
+    principal: &Principal,
+    repository_id: &str,
+    body: &[u8],
+) -> Result<String, String> {
+    use temper_wasm_sdk::http_stream::streaming_call;
+
+    let url = format!("{TEMPER_API}/tdata/Blobs/Temper.IngestRaw");
+    let content_length = body.len().to_string();
+
+    // Strip the JSON Content-Type the principal helper attaches
+    // and add the protocol-specific ones for this endpoint.
+    let mut owned: Vec<(String, String)> = principal
+        .outbound_headers()
+        .into_iter()
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("content-type"))
+        .collect();
+    owned.push((
+        "Content-Type".to_string(),
+        "application/octet-stream".to_string(),
+    ));
+    owned.push(("Content-Length".to_string(), content_length));
+    owned.push(("X-Repository-Id".to_string(), repository_id.to_string()));
+    let header_refs: Vec<(&str, &str)> =
+        owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+    let (mut req, mut resp, head) = streaming_call("POST", &url, &header_refs)
+        .map_err(|e| format!("ingest stream begin: {e}"))?;
+
+    const STREAM_CHUNK: usize = 64 * 1024;
+    for chunk in body.chunks(STREAM_CHUNK) {
+        req.write_all_chunk(chunk)
+            .map_err(|e| format!("ingest write: {e}"))?;
+    }
+    req.finish().map_err(|e| format!("ingest finish: {e}"))?;
+
+    let head = head().map_err(|e| format!("ingest head: {e}"))?;
+    if !(200..400).contains(&head.status) {
+        return Err(format!("ingest status {}", head.status));
+    }
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut scratch = alloc::vec![0u8; 4096];
+    loop {
+        match resp.read_next_chunk(&mut scratch) {
+            Ok(None) => break,
+            Ok(Some(n)) => buf.extend_from_slice(&scratch[..n]),
+            Err(e) => return Err(format!("ingest read response: {e}")),
+        }
+    }
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&buf).map_err(|e| format!("ingest response json: {e}"))?;
+    parsed
+        .get("Id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| "ingest response missing Id".to_string())
 }
 
 fn apply_ref_command(
