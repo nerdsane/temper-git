@@ -216,31 +216,105 @@ pub fn parse_pack(bytes: &[u8]) -> Result<Vec<PackObject>, PackError> {
 /// line with our v0 parser. Callers that need delta emission
 /// should convert to plain objects first.
 pub fn emit_pack(objects: &[PackObject]) -> Vec<u8> {
-    use flate2::write::ZlibEncoder;
-    use flate2::Compression;
-    use std::io::Write;
-
-    let mut out = Vec::new();
-    out.extend_from_slice(b"PACK");
-    out.extend_from_slice(&2u32.to_be_bytes());
-    out.extend_from_slice(&(objects.len() as u32).to_be_bytes());
-
+    let mut emitter = PackEmitter::begin(Vec::new(), objects.len() as u32)
+        .expect("Vec write never fails");
     for obj in objects {
-        // Variable-length header: 3-bit type, 4-bit low size, then
-        // 7-bit chunks continuation-flagged.
-        let type_bits = match obj.kind {
+        emitter
+            .write_object(obj.kind, &obj.data)
+            .expect("Vec write never fails");
+    }
+    emitter.finish().expect("Vec write never fails")
+}
+
+/// Streaming pack-v2 emitter.
+///
+/// Writes the 12-byte pack header on `begin`, one full object per
+/// `write_object` call, and the 20-byte SHA-1 trailer on `finish`.
+/// Every byte is fed through a SHA-1 hasher as it goes out, so the
+/// trailer matches the bytes that were actually written even when
+/// the underlying `Write` is a streaming sink (HTTP response body,
+/// pkt-line framer, …).
+///
+/// Object count is required up front because the pack header carries
+/// it, and pack-v2 has no way to revise it once written. Walk the
+/// DAG first to enumerate; emit second.
+pub struct PackEmitter<W: std::io::Write> {
+    inner: ShaWriter<W>,
+}
+
+impl<W: std::io::Write> PackEmitter<W> {
+    /// Begin a pack: writes `PACK\0\0\0\2<count>` to `writer`.
+    pub fn begin(writer: W, count: u32) -> std::io::Result<Self> {
+        use std::io::Write;
+        let mut inner = ShaWriter::new(writer);
+        inner.write_all(b"PACK")?;
+        inner.write_all(&2u32.to_be_bytes())?;
+        inner.write_all(&count.to_be_bytes())?;
+        Ok(Self { inner })
+    }
+
+    /// Emit one object. Writes the variable-length type+size header
+    /// and the zlib-deflated body. The body is consumed in one call;
+    /// for very large blobs use `write_object_stream`.
+    pub fn write_object(
+        &mut self,
+        kind: ObjectKind,
+        body: &[u8],
+    ) -> std::io::Result<()> {
+        self.write_header(kind, body.len())?;
+        self.write_deflated(body)
+    }
+
+    /// Variant that takes a `Read` and a known size. Lets callers
+    /// stream a body of any length without holding it all in memory.
+    pub fn write_object_stream<R: std::io::Read>(
+        &mut self,
+        kind: ObjectKind,
+        size: usize,
+        mut body: R,
+    ) -> std::io::Result<()> {
+        self.write_header(kind, size)?;
+        // Pipe `body` through the deflater, which writes through us.
+        let mut enc = flate2::write::ZlibEncoder::new(
+            HasherSink { inner: &mut self.inner },
+            flate2::Compression::default(),
+        );
+        std::io::copy(&mut body, &mut enc)?;
+        enc.finish()?;
+        Ok(())
+    }
+
+    /// Close the pack: writes the 20-byte SHA-1 trailer over every
+    /// byte handed to `begin`/`write_object*` and returns the
+    /// underlying writer.
+    pub fn finish(self) -> std::io::Result<W> {
+        use sha1::Digest;
+        let ShaWriter { mut inner, hasher } = self.inner;
+        let trailer = hasher.finalize();
+        inner.write_all(&trailer)?;
+        Ok(inner)
+    }
+
+    fn write_header(
+        &mut self,
+        kind: ObjectKind,
+        size: usize,
+    ) -> std::io::Result<()> {
+        use std::io::Write;
+        let type_bits = match kind {
             ObjectKind::Commit => 1u8,
             ObjectKind::Tree => 2,
             ObjectKind::Blob => 3,
             ObjectKind::Tag => 4,
         };
-        let size = obj.data.len();
         let low = (size & 0x0f) as u8;
         let rest = size >> 4;
         if rest == 0 {
-            out.push((type_bits << 4) | low);
+            self.inner.write_all(&[(type_bits << 4) | low])
         } else {
-            out.push(0x80 | (type_bits << 4) | low);
+            let mut buf = [0u8; 16];
+            buf[0] = 0x80 | (type_bits << 4) | low;
+            let mut n = 1;
             let mut r = rest;
             while r > 0 {
                 let mut b = (r & 0x7f) as u8;
@@ -248,23 +322,71 @@ pub fn emit_pack(objects: &[PackObject]) -> Vec<u8> {
                 if r > 0 {
                     b |= 0x80;
                 }
-                out.push(b);
+                buf[n] = b;
+                n += 1;
+                debug_assert!(n <= buf.len());
             }
+            self.inner.write_all(&buf[..n])
         }
-        // Deflate body.
-        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-        enc.write_all(&obj.data)
-            .expect("zlib write to Vec never fails");
-        let deflated = enc.finish().expect("zlib finish to Vec never fails");
-        out.extend_from_slice(&deflated);
     }
 
-    // 20-byte SHA-1 trailer.
-    use sha1::Digest;
-    let mut h = sha1::Sha1::new();
-    h.update(&out);
-    out.extend_from_slice(&h.finalize());
-    out
+    fn write_deflated(&mut self, body: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut enc = flate2::write::ZlibEncoder::new(
+            HasherSink { inner: &mut self.inner },
+            flate2::Compression::default(),
+        );
+        enc.write_all(body)?;
+        enc.finish()?;
+        Ok(())
+    }
+}
+
+/// `Write` adapter that feeds every byte to a SHA-1 hasher before
+/// forwarding to the inner sink. Owns the hasher; surrendered by
+/// `finish` to compute the trailer.
+struct ShaWriter<W: std::io::Write> {
+    inner: W,
+    hasher: sha1::Sha1,
+}
+
+impl<W: std::io::Write> ShaWriter<W> {
+    fn new(inner: W) -> Self {
+        use sha1::Digest;
+        Self {
+            inner,
+            hasher: sha1::Sha1::new(),
+        }
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for ShaWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use sha1::Digest;
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Tiny `Write` wrapper that lets `ZlibEncoder` write back through
+/// `&mut ShaWriter` without taking ownership.
+struct HasherSink<'a, W: std::io::Write> {
+    inner: &'a mut ShaWriter<W>,
+}
+
+impl<W: std::io::Write> std::io::Write for HasherSink<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 fn decode_object_header(buf: &[u8]) -> Result<(ObjectKind, usize, usize), PackError> {
@@ -525,5 +647,83 @@ mod tests {
         let pack = vec![0u8; 20]; // shorter than minimum 32
         let err = parse_pack(&pack).unwrap_err();
         assert!(matches!(err, PackError::Truncated { .. }));
+    }
+
+    #[test]
+    fn pack_emitter_streams_match_emit_pack() {
+        // The streaming API must produce byte-identical output to
+        // the convenience function — same header, same per-object
+        // encoding, same trailer SHA-1.
+        let objs = vec![
+            PackObject {
+                kind: ObjectKind::Commit,
+                data: b"tree abc\nauthor x\n\nm".to_vec(),
+            },
+            PackObject {
+                kind: ObjectKind::Tree,
+                data: vec![b'a'; 500],
+            },
+            PackObject {
+                kind: ObjectKind::Blob,
+                data: b"hello".to_vec(),
+            },
+        ];
+
+        let want = emit_pack(&objs);
+
+        let mut got = Vec::new();
+        let mut emitter = PackEmitter::begin(&mut got, objs.len() as u32).unwrap();
+        for obj in &objs {
+            emitter.write_object(obj.kind, &obj.data).unwrap();
+        }
+        emitter.finish().unwrap();
+
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn pack_emitter_stream_object_matches_buffered() {
+        // write_object_stream(reader) should be byte-identical to
+        // write_object(slice) for the same content.
+        let body = vec![0xABu8; 4096];
+
+        let mut buffered = Vec::new();
+        let mut e1 = PackEmitter::begin(&mut buffered, 1).unwrap();
+        e1.write_object(ObjectKind::Blob, &body).unwrap();
+        e1.finish().unwrap();
+
+        let mut streamed = Vec::new();
+        let mut e2 = PackEmitter::begin(&mut streamed, 1).unwrap();
+        e2.write_object_stream(ObjectKind::Blob, body.len(), body.as_slice())
+            .unwrap();
+        e2.finish().unwrap();
+
+        assert_eq!(buffered, streamed);
+    }
+
+    #[test]
+    fn pack_emitter_roundtrip_via_parse_pack() {
+        // End-to-end: emit through the streaming API, parse back,
+        // get the same objects.
+        let objs = vec![
+            PackObject {
+                kind: ObjectKind::Blob,
+                data: b"hello world".to_vec(),
+            },
+            PackObject {
+                kind: ObjectKind::Tag,
+                data: b"object abc\ntype commit\ntag v1\n".to_vec(),
+            },
+        ];
+
+        let mut out = Vec::new();
+        let mut emitter = PackEmitter::begin(&mut out, objs.len() as u32).unwrap();
+        for obj in &objs {
+            emitter.write_object(obj.kind, &obj.data).unwrap();
+        }
+        emitter.finish().unwrap();
+
+        let parsed = parse_pack(&out).unwrap();
+        assert_eq!(parsed, objs);
     }
 }

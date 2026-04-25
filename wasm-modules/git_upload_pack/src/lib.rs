@@ -17,16 +17,19 @@
 
 extern crate alloc;
 
-use alloc::collections::{BTreeSet, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use temper_wasm_sdk::http_stream::{streaming_call, InboundHttp};
+use temper_wasm_sdk::http_stream::{streaming_call, HttpRequestBodyWriter, InboundHttp};
 use temper_wasm_sdk::prelude::*;
-use tg_wire::{advertise_info_refs, emit_pack, encode_into, flush, AdvertisedRef, ObjectKind, PackObject, Service};
+use tg_wire::{
+    advertise_info_refs, encode_into, flush, AdvertisedRef, ObjectKind, PackEmitter,
+    Service, SidebandWriter,
+};
 
 const TEMPER_API: &str = "http://127.0.0.1:3000";
 const SYSTEM_TENANT: &str = "default";
@@ -235,8 +238,10 @@ const READ_CHUNK: usize = 16 * 1024;
 const OUTBOUND_READ_CHUNK: usize = 64 * 1024;
 const MAX_OBJECT_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
-fn serve_upload_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
-    // 1. Read request body.
+fn serve_upload_pack(_ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
+    // 1. Read the request body. Bounded: want/have negotiation
+    //    payloads are tiny (a few KB even for huge repos), so we
+    //    cap at 16 MiB and buffer.
     let mut body = Vec::new();
     let mut scratch = alloc::vec![0u8; READ_CHUNK];
     let mut reader = http.request_body();
@@ -259,9 +264,12 @@ fn serve_upload_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String>
     let repo = http.params.get("repo").cloned().unwrap_or_default();
     let repository_id = format!("rp-{owner}-{repo}");
 
-    // 3. Walk the DAG. Start from wants; skip anything the client
-    //    already has (listed in `haves`). v0: naive — no negotiation,
-    //    just serve everything reachable minus the haves.
+    // 3. Pass 1 — walk the DAG. We need the object count for the
+    //    pack header before we can stream a single byte, so this
+    //    pass enumerates SHAs and caches commit/tree bytes (small,
+    //    needed for parsing). Blob and Tag bytes are NOT fetched
+    //    here; they're streamed in pass 2 and dropped between
+    //    objects, so peak memory stays at O(largest blob).
     let have_set: BTreeSet<String> = parsed.haves.iter().cloned().collect();
     let mut visited: BTreeSet<String> = have_set.clone();
     let mut queue: VecDeque<(String, ObjectKind)> = VecDeque::new();
@@ -269,63 +277,53 @@ fn serve_upload_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String>
         queue.push_back((want.clone(), ObjectKind::Commit));
     }
 
-    let mut objects: Vec<PackObject> = Vec::new();
+    let mut walk_order: Vec<(String, ObjectKind)> = Vec::new();
+    let mut graph_cache: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     while let Some((sha, kind)) = queue.pop_front() {
         if !visited.insert(sha.clone()) {
             continue;
         }
-        let raw_body = fetch_object_body(ctx, kind, &sha, &repository_id)?;
         match kind {
-            ObjectKind::Commit => {
-                let refs = tg_canonical::parse_commit_refs(&raw_body)
-                    .map_err(|e| format!("commit {sha}: {e}"))?;
-                queue.push_back((refs.tree, ObjectKind::Tree));
-                for p in refs.parents {
-                    queue.push_back((p, ObjectKind::Commit));
+            ObjectKind::Commit | ObjectKind::Tree => {
+                let raw_body = fetch_object_body(kind, &sha, &repository_id)?;
+                if matches!(kind, ObjectKind::Commit) {
+                    let refs = tg_canonical::parse_commit_refs(&raw_body)
+                        .map_err(|e| format!("commit {sha}: {e}"))?;
+                    queue.push_back((refs.tree, ObjectKind::Tree));
+                    for p in refs.parents {
+                        queue.push_back((p, ObjectKind::Commit));
+                    }
+                } else {
+                    let entries = tg_canonical::parse_tree(&raw_body)
+                        .map_err(|e| format!("tree {sha}: {e}"))?;
+                    for entry in entries {
+                        let k = if entry.is_tree {
+                            ObjectKind::Tree
+                        } else {
+                            ObjectKind::Blob
+                        };
+                        queue.push_back((entry.sha, k));
+                    }
                 }
+                graph_cache.insert(sha.clone(), raw_body);
             }
-            ObjectKind::Tree => {
-                let entries = tg_canonical::parse_tree(&raw_body)
-                    .map_err(|e| format!("tree {sha}: {e}"))?;
-                for entry in entries {
-                    let k = if entry.is_tree {
-                        ObjectKind::Tree
-                    } else {
-                        ObjectKind::Blob
-                    };
-                    queue.push_back((entry.sha, k));
-                }
+            ObjectKind::Blob | ObjectKind::Tag => {
+                // Defer to pass 2 — body is fetched, deflated, and
+                // dropped during emission.
             }
-            _ => {}
         }
-        objects.push(PackObject {
-            kind,
-            data: raw_body,
-        });
+        walk_order.push((sha, kind));
     }
 
-    // 4. Emit pack.
-    let pack = emit_pack(&objects);
-
-    // 5. Build response. First line is NAK (we don't negotiate in v0),
-    //    then pack is wrapped in side-band-64k channel 1 if negotiated.
-    let mut resp = Vec::new();
-    encode_into(&mut resp, b"NAK\n").map_err(|e| format!("nak: {e}"))?;
-
-    let sideband = parsed.capabilities.iter().any(|c| c == "side-band-64k");
-    if sideband {
-        for chunk in pack.chunks(65515) {
-            let mut payload = Vec::with_capacity(1 + chunk.len());
-            payload.push(0x01);
-            payload.extend_from_slice(chunk);
-            encode_into(&mut resp, &payload)
-                .map_err(|e| format!("sideband pkt: {e}"))?;
-        }
-        flush(&mut resp);
-    } else {
-        resp.extend_from_slice(&pack);
-    }
-
+    // 4. Pass 2 — stream the response. Order:
+    //      pkt-line "NAK\n"   (no negotiation in v0)
+    //      pack header + objects + SHA-1 trailer (sidebanded if
+    //      negotiated)
+    //      pkt-line flush
+    //
+    // The pack flows through PackEmitter → SidebandWriter (if
+    // negotiated) → WasmBodyWriter, so we never hold the assembled
+    // pack or the framed response in memory.
     http.submit_response_head(
         200,
         &[
@@ -334,17 +332,141 @@ fn serve_upload_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String>
         ],
     )
     .map_err(|e| format!("head: {e}"))?;
-    let mut writer = http.response_body();
+
+    let mut writer = WasmBodyWriter::new(http.response_body());
+
+    // NAK pkt-line. Tiny — no need to stream.
+    let mut nak = Vec::new();
+    encode_into(&mut nak, b"NAK\n").map_err(|e| format!("nak: {e}"))?;
+    use std::io::Write;
+    writer.write_all(&nak).map_err(|e| format!("nak write: {e}"))?;
+
+    let sideband = parsed.capabilities.iter().any(|c| c == "side-band-64k");
+    let object_count = walk_order.len() as u32;
+    let pack_byte_count = if sideband {
+        let sb = SidebandWriter::new(&mut writer);
+        emit_pack_streaming(sb, object_count, walk_order, graph_cache, &repository_id, sideband)?
+    } else {
+        emit_pack_streaming(&mut writer, object_count, walk_order, graph_cache, &repository_id, sideband)?
+    };
+
+    // Trailing pkt-line flush ends the response.
+    let mut tail = Vec::new();
+    flush(&mut tail);
+    writer.write_all(&tail).map_err(|e| format!("tail: {e}"))?;
     writer
-        .write_all_chunk(&resp)
-        .map_err(|e| format!("body write: {e}"))?;
-    writer.finish().map_err(|e| format!("body close: {e}"))?;
+        .into_inner()
+        .finish()
+        .map_err(|e| format!("body close: {e}"))?;
 
     Ok(json!({
         "wants": parsed.wants.len(),
-        "objects": objects.len(),
-        "pack_bytes": pack.len(),
+        "objects": object_count,
+        "pack_bytes": pack_byte_count,
     }))
+}
+
+/// Drives the PackEmitter. Returns the number of pack bytes written
+/// (header + objects + trailer) for the response envelope.
+fn emit_pack_streaming<W: std::io::Write>(
+    sink: W,
+    object_count: u32,
+    walk_order: Vec<(String, ObjectKind)>,
+    mut graph_cache: BTreeMap<String, Vec<u8>>,
+    repository_id: &str,
+    sideband: bool,
+) -> Result<usize, String> {
+    // Wrap the sink in a counting writer so we can report bytes
+    // written without the caller having to track them.
+    let counting = CountingWriter::new(sink);
+    let mut emitter = PackEmitter::begin(counting, object_count)
+        .map_err(|e| format!("pack header: {e}"))?;
+
+    for (sha, kind) in walk_order {
+        let body = match kind {
+            ObjectKind::Commit | ObjectKind::Tree => graph_cache
+                .remove(&sha)
+                .ok_or_else(|| format!("walk-cache miss for {sha}"))?,
+            ObjectKind::Blob | ObjectKind::Tag => {
+                fetch_object_body(kind, &sha, repository_id)?
+            }
+        };
+        emitter
+            .write_object(kind, &body)
+            .map_err(|e| format!("emit {sha}: {e}"))?;
+    }
+
+    let counting = emitter.finish().map_err(|e| format!("pack trailer: {e}"))?;
+    let pack_bytes = counting.bytes_written();
+
+    // If we wrapped in a SidebandWriter, flush its tail frame back
+    // through the body sink before returning.
+    let _final_sink = counting.into_inner();
+    let _ = sideband; // sink type already captures this; nothing else to do.
+    Ok(pack_bytes)
+}
+
+/// `std::io::Write` adapter over `HttpRequestBodyWriter`. The SDK
+/// only exposes `write_all_chunk` / `finish`; this lets the pack
+/// emitter and sideband framer write through it with a normal
+/// `Write` impl.
+struct WasmBodyWriter {
+    inner: HttpRequestBodyWriter,
+}
+
+impl WasmBodyWriter {
+    fn new(inner: HttpRequestBodyWriter) -> Self {
+        Self { inner }
+    }
+
+    fn into_inner(self) -> HttpRequestBodyWriter {
+        self.inner
+    }
+}
+
+impl std::io::Write for WasmBodyWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner
+            .write_all_chunk(buf)
+            .map(|_| buf.len())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Pass-through `Write` that counts the bytes that go through it.
+struct CountingWriter<W: std::io::Write> {
+    inner: W,
+    n: usize,
+}
+
+impl<W: std::io::Write> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, n: 0 }
+    }
+
+    fn bytes_written(&self) -> usize {
+        self.n
+    }
+
+    fn into_inner(self) -> W {
+        self.inner
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.n += written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 struct UploadRequest {
@@ -403,7 +525,6 @@ fn parse_upload_request(buf: &[u8]) -> Result<UploadRequest, String> {
 }
 
 fn fetch_object_body(
-    _ctx: &Context,
     kind: ObjectKind,
     sha: &str,
     _repo_id: &str,
