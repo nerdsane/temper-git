@@ -41,7 +41,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use temper_wasm_sdk::http_stream::InboundHttp;
 use temper_wasm_sdk::prelude::*;
 use tg_wire::{
-    advertise_info_refs, commands, encode_into, flush, pack, AdvertisedRef, CommandKind, Service,
+    AdvertisedRef, CommandKind, Service, advertise_info_refs, commands, encode_into, flush, pack,
 };
 
 /// Cap on the command-list bytes accumulated before pack parsing
@@ -73,7 +73,7 @@ temper_module! {
         let path = raw.split('?').next().unwrap_or(raw);
 
         if http.method == "GET" && path.ends_with("/info/refs") {
-            return serve_info_refs(&http);
+            return serve_info_refs(&ctx, &http);
         }
         if http.method == "POST" && path.ends_with("/git-receive-pack") {
             return serve_receive_pack(&ctx, &http);
@@ -82,7 +82,7 @@ temper_module! {
     }
 }
 
-fn serve_info_refs(http: &InboundHttp) -> Result<Value, String> {
+fn serve_info_refs(ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
     let service = match query_param(http, "service").as_deref() {
         Some("git-receive-pack") => Service::ReceivePack,
         Some("git-upload-pack") | None => Service::UploadPack,
@@ -95,9 +95,28 @@ fn serve_info_refs(http: &InboundHttp) -> Result<Value, String> {
             );
         }
     };
-    let refs: Vec<AdvertisedRef<'_>> = Vec::new();
-    let body = advertise_info_refs(service, &refs)
-        .map_err(|e| format!("advertise_info_refs: {e}"))?;
+
+    let owner = http.params.get("owner").cloned().unwrap_or_default();
+    let repo = http.params.get("repo").cloned().unwrap_or_default();
+    let repository_id = format!("rp-{owner}-{repo}");
+    let principal = effective_principal(ctx, &http.headers);
+    let refs_rows = fetch_refs_for_repo(ctx, &principal, &repository_id)?;
+
+    let owned: Vec<(String, String)> = refs_rows
+        .into_iter()
+        .filter(|r| r.status == "Active" && r.name != "HEAD")
+        .map(|r| (r.target_sha, r.name))
+        .collect();
+    let refs: Vec<AdvertisedRef<'_>> = owned
+        .iter()
+        .map(|(sha, name)| AdvertisedRef {
+            sha: sha.as_str(),
+            name: name.as_str(),
+        })
+        .collect();
+
+    let body =
+        advertise_info_refs(service, &refs).map_err(|e| format!("advertise_info_refs: {e}"))?;
     http.submit_response_head(
         200,
         &[
@@ -113,7 +132,11 @@ fn serve_info_refs(http: &InboundHttp) -> Result<Value, String> {
     writer
         .finish()
         .map_err(|e| format!("response_body close: {e}"))?;
-    Ok(json!({ "bytes_written": body.len() }))
+    Ok(json!({
+        "bytes_written": body.len(),
+        "ref_count": refs.len(),
+        "repository_id": repository_id,
+    }))
 }
 
 fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
@@ -126,12 +149,7 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
     // an Active GitToken returns that token's principal + scopes;
     // otherwise we fall through to the system principal for
     // backwards-compat with un-tokenised dev setups.
-    let resolved = auth::resolve_principal(ctx, &http.headers);
-    let principal = if resolved.is_anonymous() {
-        Principal::system()
-    } else {
-        resolved
-    };
+    let principal = effective_principal(ctx, &http.headers);
 
     // Stream the request body. We read JUST the command list bytes
     // (pkt-line framed; ends at a 0000 flush), then hand the same
@@ -143,8 +161,8 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
         WasmRequestReader::new(http.request_body()),
     );
     let cmd_bytes = read_command_list(&mut reader)?;
-    let parsed = commands::parse_commands(&cmd_bytes)
-        .map_err(|e| format!("parse_commands: {e}"))?;
+    let parsed =
+        commands::parse_commands(&cmd_bytes).map_err(|e| format!("parse_commands: {e}"))?;
 
     let mut unpack_status = "ok".to_string();
     let mut per_obj_errors: Vec<String> = Vec::new();
@@ -219,7 +237,10 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
     let mut ref_statuses: Vec<(String, Result<(), String>)> = Vec::new();
     for cmd in &parsed.commands {
         let result = if !per_obj_errors.is_empty() {
-            Err(alloc::format!("object write failures: {}", per_obj_errors.len()))
+            Err(alloc::format!(
+                "object write failures: {}",
+                per_obj_errors.len()
+            ))
         } else {
             apply_ref_command(ctx, &principal, &repository_id, cmd)
         };
@@ -233,15 +254,13 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
     } else {
         format!("unpack {unpack_status}\n")
     };
-    encode_into(&mut inner, unpack_line.as_bytes())
-        .map_err(|e| format!("encode unpack: {e}"))?;
+    encode_into(&mut inner, unpack_line.as_bytes()).map_err(|e| format!("encode unpack: {e}"))?;
     for (refname, status) in &ref_statuses {
         let line = match status {
             Ok(()) => format!("ok {refname}\n"),
             Err(reason) => format!("ng {refname} {reason}\n"),
         };
-        encode_into(&mut inner, line.as_bytes())
-            .map_err(|e| format!("encode ref status: {e}"))?;
+        encode_into(&mut inner, line.as_bytes()).map_err(|e| format!("encode ref status: {e}"))?;
     }
     flush(&mut inner);
 
@@ -253,8 +272,7 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
             let mut payload = Vec::with_capacity(1 + chunk.len());
             payload.push(0x01); // channel 1 (pack/result)
             payload.extend_from_slice(chunk);
-            encode_into(&mut response, &payload)
-                .map_err(|e| format!("encode sideband: {e}"))?;
+            encode_into(&mut response, &payload).map_err(|e| format!("encode sideband: {e}"))?;
         }
         flush(&mut response);
     } else {
@@ -407,9 +425,90 @@ fn apply_ref_command(
             Ok(())
         }
         CommandKind::Delete => {
-            Err("ref delete not implemented".to_string())
+            let ref_id = ref_id_for(repository_id, &cmd.refname);
+            let url = format!("{TEMPER_API}/tdata/Refs('{ref_id}')/Temper.Delete");
+            let resp = post_json(ctx, principal, &url, "{}")?;
+            if !(200..400).contains(&resp.status) {
+                return Err(format!("ref delete status {}", resp.status));
+            }
+            Ok(())
         }
     }
+}
+
+fn effective_principal(ctx: &Context, headers: &[(String, String)]) -> Principal {
+    let resolved = auth::resolve_principal(ctx, headers);
+    if resolved.is_anonymous() {
+        Principal::system()
+    } else {
+        resolved
+    }
+}
+
+struct RefRow {
+    name: String,
+    target_sha: String,
+    status: String,
+}
+
+fn fetch_refs_for_repo(
+    ctx: &Context,
+    principal: &Principal,
+    repository_id: &str,
+) -> Result<Vec<RefRow>, String> {
+    let url = format!("{TEMPER_API}/tdata/Refs");
+    let resp = ctx
+        .http_call("GET", &url, &principal.outbound_headers(), "")
+        .map_err(|e| format!("fetch refs: {e}"))?;
+    if !(200..400).contains(&resp.status) {
+        return Err(format!("fetch refs status {}", resp.status));
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(&resp.body).map_err(|e| format!("refs parse: {e}"))?;
+    let items = parsed
+        .get("value")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut rows = Vec::with_capacity(items.len());
+    for row in items {
+        let fields = row
+            .get("fields")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let repo = fields
+            .get("RepositoryId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if repo != repository_id {
+            continue;
+        }
+        let name = fields
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let target_sha = fields
+            .get("TargetCommitSha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let status = fields
+            .get("Status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if name.is_empty() || target_sha.is_empty() {
+            continue;
+        }
+        rows.push(RefRow {
+            name,
+            target_sha,
+            status,
+        });
+    }
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(rows)
 }
 
 fn ref_id_for(repository_id: &str, refname: &str) -> String {
@@ -456,9 +555,7 @@ fn propagate_to_open_prs(
             continue;
         };
         let body = json!({ "NewHeadCommitSha": new_head });
-        let url = format!(
-            "{TEMPER_API}/tdata/PullRequests('{pr_id}')/Temper.UpdateHead"
-        );
+        let url = format!("{TEMPER_API}/tdata/PullRequests('{pr_id}')/Temper.UpdateHead");
         let _ = post_json(ctx, principal, &url, &body.to_string());
     }
     Ok(())
@@ -616,10 +713,10 @@ fn read_command_list<R: std::io::BufRead>(reader: &mut R) -> Result<Vec<u8>, Str
             .read_exact(&mut len_buf)
             .map_err(|e| format!("read pkt length: {e}"))?;
         out.extend_from_slice(&len_buf);
-        let len_str = core::str::from_utf8(&len_buf)
-            .map_err(|e| format!("pkt length not ASCII: {e}"))?;
-        let pkt_len = usize::from_str_radix(len_str, 16)
-            .map_err(|e| format!("pkt length not hex: {e}"))?;
+        let len_str =
+            core::str::from_utf8(&len_buf).map_err(|e| format!("pkt length not ASCII: {e}"))?;
+        let pkt_len =
+            usize::from_str_radix(len_str, 16).map_err(|e| format!("pkt length not hex: {e}"))?;
         if pkt_len == 0 {
             // Flush — end of command list.
             return Ok(out);
