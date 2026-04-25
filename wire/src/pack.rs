@@ -13,17 +13,22 @@
 //!   20 bytes SHA-1 over all preceding bytes
 //! ```
 //!
-//! Scope of this v0 parser:
+//! Two parser flavours:
+//!
+//!   * [`parse_pack`] — buffer in, `Vec<PackObject>` out. Used in
+//!     tests and host-side tools that already have the bytes.
+//!   * [`StreamingPackParser`] — byte source in, one decoded object
+//!     at a time out. Used by the receive-pack WASM so push payloads
+//!     never need to be fully buffered: each object is decoded,
+//!     persisted, and dropped before the next is read.
+//!
+//! Both share the same supported-types matrix:
 //!   * types 1..=4 (commit, tree, blob, tag) — full support
 //!   * types 6 (ofs-delta) and 7 (ref-delta) — rejected with a
 //!     descriptive error. Real delta support is a follow-up;
 //!     first-push workloads don't emit deltas, and we advertise
 //!     neither `thin-pack` nor `ofs-delta` on receive-pack so
 //!     clients won't send them.
-//!   * Streaming not required at this layer — the WASM receive-
-//!     pack handler buffers the pack into memory (bounded) and
-//!     passes it here. Streaming is an optimization for large
-//!     repos; out of scope for v0.
 
 #![allow(clippy::result_large_err)]
 
@@ -434,6 +439,232 @@ fn decode_object_header(buf: &[u8]) -> Result<(ObjectKind, usize, usize), PackEr
     Ok((kind, size, used))
 }
 
+// ---------------------------------------------------------------------
+// Streaming parser
+// ---------------------------------------------------------------------
+
+/// Incremental pack-v2 parser.
+///
+/// `begin` reads and validates the 12-byte header, exposing
+/// `object_count`. `next_object` decodes one object at a time —
+/// reads the type/size header, consumes a single zlib stream, hashes
+/// the raw pack bytes as they go past, and returns the inflated
+/// object body. `finish` reads the 20-byte trailer and verifies it
+/// against the running hash.
+///
+/// The parser owns its source as a `BufRead`. Memory profile is one
+/// object's body plus zlib's internal state — buffered packs of any
+/// size can be drained without holding more than that.
+pub struct StreamingPackParser<R: std::io::BufRead> {
+    inner: R,
+    hasher: sha1::Sha1,
+    object_count: u32,
+    consumed: u32,
+}
+
+impl<R: std::io::BufRead> StreamingPackParser<R> {
+    /// Read and validate the 12-byte pack header. Returns a parser
+    /// positioned at the first object's type+size byte.
+    pub fn begin(mut inner: R) -> Result<Self, PackError> {
+        use sha1::Digest;
+        let mut hasher = sha1::Sha1::new();
+        let mut header = [0u8; 12];
+        read_exact_hashed(&mut inner, &mut hasher, &mut header)?;
+        if &header[..4] != b"PACK" {
+            let mut magic = [0u8; 4];
+            magic.copy_from_slice(&header[..4]);
+            return Err(PackError::BadMagic(magic));
+        }
+        let version = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+        if version != 2 {
+            return Err(PackError::UnsupportedVersion(version));
+        }
+        let object_count =
+            u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
+        Ok(Self {
+            inner,
+            hasher,
+            object_count,
+            consumed: 0,
+        })
+    }
+
+    /// Number of objects the pack header declared.
+    pub fn object_count(&self) -> u32 {
+        self.object_count
+    }
+
+    /// Pull the next decoded object. Returns `Ok(None)` once every
+    /// declared object has been yielded; the caller should then
+    /// invoke `finish` to validate the trailer.
+    pub fn next_object(&mut self) -> Result<Option<PackObject>, PackError> {
+        if self.consumed >= self.object_count {
+            return Ok(None);
+        }
+        let (kind, declared_size) = read_object_header_hashed(&mut self.inner, &mut self.hasher)?;
+        let data = inflate_one_object_hashed(&mut self.inner, &mut self.hasher, declared_size)?;
+        self.consumed += 1;
+        Ok(Some(PackObject { kind, data }))
+    }
+
+    /// Read and verify the 20-byte SHA-1 trailer, then drop the
+    /// reader. Errors if the trailer doesn't match the running hash
+    /// or the declared object count was wrong.
+    pub fn finish(mut self) -> Result<(), PackError> {
+        if self.consumed != self.object_count {
+            return Err(PackError::SizeMismatch {
+                declared: self.object_count as usize,
+                actual: self.consumed as usize,
+            });
+        }
+        let mut trailer = [0u8; 20];
+        // The trailer is NOT hashed — it's the hash itself.
+        self.inner
+            .read_exact(&mut trailer)
+            .map_err(|_| PackError::TrailerMismatch)?;
+        use sha1::Digest;
+        let computed = self.hasher.finalize();
+        if computed.as_slice() != trailer {
+            return Err(PackError::TrailerMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Read exactly `buf.len()` bytes from `r`, feeding each byte to
+/// `hasher` as it goes past. Returns Truncated on short read.
+fn read_exact_hashed<R: std::io::Read>(
+    r: &mut R,
+    hasher: &mut sha1::Sha1,
+    buf: &mut [u8],
+) -> Result<(), PackError> {
+    use sha1::Digest;
+    let mut filled = 0;
+    while filled < buf.len() {
+        let n = r
+            .read(&mut buf[filled..])
+            .map_err(|e| PackError::ZlibDecompressFailed(e.to_string()))?;
+        if n == 0 {
+            return Err(PackError::Truncated {
+                got: filled,
+                need: buf.len(),
+            });
+        }
+        hasher.update(&buf[filled..filled + n]);
+        filled += n;
+    }
+    Ok(())
+}
+
+/// Read the variable-length type+size header for one object,
+/// hashing every byte that goes past.
+fn read_object_header_hashed<R: std::io::Read>(
+    r: &mut R,
+    hasher: &mut sha1::Sha1,
+) -> Result<(ObjectKind, usize), PackError> {
+    use sha1::Digest;
+    let mut byte = [0u8; 1];
+    r.read_exact(&mut byte)
+        .map_err(|_| PackError::HeaderOverrun)?;
+    hasher.update(&byte);
+    let b0 = byte[0];
+    let type_bits = (b0 >> 4) & 0b0000_0111;
+    let mut size: usize = (b0 & 0b0000_1111) as usize;
+    let mut shift: u32 = 4;
+
+    let mut last = b0;
+    while last & 0x80 != 0 {
+        r.read_exact(&mut byte)
+            .map_err(|_| PackError::HeaderOverrun)?;
+        hasher.update(&byte);
+        last = byte[0];
+        let add = (last & 0x7f) as usize;
+        let shifted = add.checked_shl(shift).ok_or(PackError::HeaderOverrun)?;
+        size = size.checked_add(shifted).ok_or(PackError::HeaderOverrun)?;
+        shift += 7;
+        if shift > 63 {
+            return Err(PackError::HeaderOverrun);
+        }
+    }
+
+    let kind = match type_bits {
+        1 => ObjectKind::Commit,
+        2 => ObjectKind::Tree,
+        3 => ObjectKind::Blob,
+        4 => ObjectKind::Tag,
+        6 | 7 => return Err(PackError::DeltaObjectsUnsupported(type_bits)),
+        other => return Err(PackError::InvalidObjectType(other)),
+    };
+    Ok((kind, size))
+}
+
+/// Decode exactly one zlib stream from `inner`, hashing the raw
+/// (compressed) bytes as they're consumed. Stops at the zlib
+/// end-of-stream marker; the BufReader is positioned right after.
+/// `expected_size` is the declared inflated size from the object
+/// header — we read that many output bytes and assert the stream
+/// ends cleanly.
+fn inflate_one_object_hashed<R: std::io::BufRead>(
+    inner: &mut R,
+    hasher: &mut sha1::Sha1,
+    expected_size: usize,
+) -> Result<Vec<u8>, PackError> {
+    use flate2::{Decompress, FlushDecompress, Status};
+    use sha1::Digest;
+
+    let mut decoder = Decompress::new(true);
+    let mut output: Vec<u8> = Vec::with_capacity(expected_size.min(1 << 20));
+    output.resize(expected_size, 0);
+    let mut out_pos = 0;
+
+    loop {
+        let in_buf = inner
+            .fill_buf()
+            .map_err(|e| PackError::ZlibDecompressFailed(e.to_string()))?;
+        if in_buf.is_empty() {
+            return Err(PackError::ZlibDecompressFailed(
+                "unexpected EOF inside zlib stream".to_string(),
+            ));
+        }
+        let in_before = decoder.total_in();
+        let status = decoder
+            .decompress(in_buf, &mut output[out_pos..], FlushDecompress::None)
+            .map_err(|e| PackError::ZlibDecompressFailed(e.to_string()))?;
+        let consumed_in = (decoder.total_in() - in_before) as usize;
+        let produced = (decoder.total_out() as usize).saturating_sub(out_pos);
+        hasher.update(&in_buf[..consumed_in]);
+        inner.consume(consumed_in);
+        out_pos += produced;
+
+        match status {
+            Status::StreamEnd => break,
+            Status::Ok | Status::BufError => {
+                if out_pos > expected_size {
+                    return Err(PackError::SizeMismatch {
+                        declared: expected_size,
+                        actual: out_pos,
+                    });
+                }
+                if consumed_in == 0 && produced == 0 {
+                    // Decoder needs more input but produced nothing
+                    // and consumed nothing — caller must give it more
+                    // bytes. The fill_buf above will block / refill
+                    // on the next iteration.
+                    continue;
+                }
+            }
+        }
+    }
+
+    if out_pos != expected_size {
+        return Err(PackError::SizeMismatch {
+            declared: expected_size,
+            actual: out_pos,
+        });
+    }
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,6 +930,143 @@ mod tests {
         e2.finish().unwrap();
 
         assert_eq!(buffered, streamed);
+    }
+
+    #[test]
+    fn streaming_parser_matches_parse_pack_empty() {
+        let pack = emit_pack(&[]);
+        let mut p = StreamingPackParser::begin(std::io::Cursor::new(&pack)).unwrap();
+        assert_eq!(p.object_count(), 0);
+        assert!(p.next_object().unwrap().is_none());
+        p.finish().unwrap();
+    }
+
+    #[test]
+    fn streaming_parser_matches_parse_pack_single() {
+        let obj = PackObject {
+            kind: ObjectKind::Blob,
+            data: b"hello world\n".to_vec(),
+        };
+        let pack = emit_pack(&[obj.clone()]);
+
+        let mut p = StreamingPackParser::begin(std::io::Cursor::new(&pack)).unwrap();
+        assert_eq!(p.object_count(), 1);
+        let got = p.next_object().unwrap().unwrap();
+        assert_eq!(got, obj);
+        assert!(p.next_object().unwrap().is_none());
+        p.finish().unwrap();
+    }
+
+    #[test]
+    fn streaming_parser_matches_parse_pack_multi() {
+        let objs = vec![
+            PackObject {
+                kind: ObjectKind::Commit,
+                data: b"tree abc\nauthor x\n\nm".to_vec(),
+            },
+            PackObject {
+                kind: ObjectKind::Tree,
+                data: vec![b'a'; 500], // multi-byte size header
+            },
+            PackObject {
+                kind: ObjectKind::Blob,
+                data: b"contents".to_vec(),
+            },
+            PackObject {
+                kind: ObjectKind::Tag,
+                data: b"object abc\ntype commit\n".to_vec(),
+            },
+        ];
+        let pack = emit_pack(&objs);
+
+        let mut p = StreamingPackParser::begin(std::io::Cursor::new(&pack)).unwrap();
+        assert_eq!(p.object_count(), 4);
+        let mut got = Vec::new();
+        while let Some(obj) = p.next_object().unwrap() {
+            got.push(obj);
+        }
+        p.finish().unwrap();
+        assert_eq!(got, objs);
+    }
+
+    #[test]
+    fn streaming_parser_rejects_corrupt_trailer() {
+        let obj = PackObject {
+            kind: ObjectKind::Blob,
+            data: b"hi".to_vec(),
+        };
+        let mut pack = emit_pack(&[obj]);
+        let last = pack.len() - 1;
+        pack[last] ^= 0xFF; // tamper with the SHA-1 trailer
+        let mut p = StreamingPackParser::begin(std::io::Cursor::new(&pack)).unwrap();
+        let _ = p.next_object().unwrap();
+        let err = p.finish().unwrap_err();
+        assert!(matches!(err, PackError::TrailerMismatch));
+    }
+
+    #[test]
+    fn streaming_parser_rejects_corrupt_pack_body() {
+        let obj = PackObject {
+            kind: ObjectKind::Blob,
+            data: b"hello".to_vec(),
+        };
+        let mut pack = emit_pack(&[obj]);
+        // Flip a byte well inside the deflated body. The streaming
+        // parser hashes raw bytes, so a body-bit flip alters the
+        // running hash; the trailer (which was computed over the
+        // original bytes) won't match.
+        pack[15] ^= 0x01;
+        // The corruption may either trip zlib or surface as a
+        // trailer mismatch; both are valid fail-closed paths.
+        let mut p = StreamingPackParser::begin(std::io::Cursor::new(&pack)).unwrap();
+        match p.next_object() {
+            Err(_) => {}
+            Ok(_) => {
+                let err = p.finish().unwrap_err();
+                assert!(matches!(err, PackError::TrailerMismatch));
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_parser_handles_chunked_reads() {
+        // Wrap the bytes in a reader that hands one byte at a time —
+        // exercises the BufRead path under maximum fragmentation.
+        let objs = vec![
+            PackObject {
+                kind: ObjectKind::Blob,
+                data: b"abc".to_vec(),
+            },
+            PackObject {
+                kind: ObjectKind::Tree,
+                data: vec![b'q'; 200],
+            },
+        ];
+        let pack = emit_pack(&objs);
+
+        struct OneByteAtATime<'a> {
+            buf: &'a [u8],
+            i: usize,
+        }
+        impl std::io::Read for OneByteAtATime<'_> {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                if self.i >= self.buf.len() || out.is_empty() {
+                    return Ok(0);
+                }
+                out[0] = self.buf[self.i];
+                self.i += 1;
+                Ok(1)
+            }
+        }
+        let inner = OneByteAtATime { buf: &pack, i: 0 };
+        let buf_inner = std::io::BufReader::with_capacity(1, inner);
+        let mut p = StreamingPackParser::begin(buf_inner).unwrap();
+        let mut got = Vec::new();
+        while let Some(obj) = p.next_object().unwrap() {
+            got.push(obj);
+        }
+        p.finish().unwrap();
+        assert_eq!(got, objs);
     }
 
     #[test]

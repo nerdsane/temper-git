@@ -44,8 +44,15 @@ use tg_wire::{
     advertise_info_refs, commands, encode_into, flush, pack, AdvertisedRef, CommandKind, Service,
 };
 
-const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
-const READ_CHUNK_BYTES: usize = 16 * 1024;
+/// Cap on the command-list bytes accumulated before pack parsing
+/// begins. The list is pkt-line framed (4-hex length + payload) and
+/// in practice tops out at a few KiB even for very large pushes —
+/// 1 MiB is generous head-room with a clear failure mode.
+const COMMAND_LIST_MAX_BYTES: usize = 1 * 1024 * 1024;
+/// BufReader capacity for the request-body stream. Big enough that
+/// the pack parser doesn't churn through tiny `fill_buf` cycles,
+/// small enough that the WASM heap isn't pinned by a giant buffer.
+const BUFREAD_CAPACITY: usize = 64 * 1024;
 pub(crate) const TEMPER_API: &str = "http://127.0.0.1:3000";
 pub(crate) const SYSTEM_TENANT: &str = "default";
 pub(crate) const SYSTEM_PRINCIPAL: &str = "git-receive-pack";
@@ -110,24 +117,15 @@ fn serve_info_refs(http: &InboundHttp) -> Result<Value, String> {
 }
 
 fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
-    let body = read_full_body(http)?;
-    let parsed = commands::parse_commands(&body)
-        .map_err(|e| format!("parse_commands: {e}"))?;
-    let pack_slice = &body[parsed.pack_offset..];
-    let objects = pack::parse_pack(pack_slice).map_err(|e| format!("parse_pack: {e}"))?;
-
     // Convention-based repository id derivation.
     let owner = http.params.get("owner").cloned().unwrap_or_default();
     let repo = http.params.get("repo").cloned().unwrap_or_default();
     let repository_id = format!("rp-{owner}-{repo}");
 
-    // Resolve the inbound caller from the Authorization header. A
-    // real bearer/Basic token whose hash matches an Active GitToken
-    // returns that token's PrincipalId + Scopes; otherwise we fall
-    // through to the system principal for backward-compat with
-    // un-tokenised dev setups. Production deployments tighten via
-    // Cedar, which then gates write actions on the real Customer/
-    // Agent principal rather than always permitting Admin.
+    // Auth resolution. A real bearer/Basic token whose hash matches
+    // an Active GitToken returns that token's principal + scopes;
+    // otherwise we fall through to the system principal for
+    // backwards-compat with un-tokenised dev setups.
     let resolved = auth::resolve_principal(ctx, &http.headers);
     let principal = if resolved.is_anonymous() {
         Principal::system()
@@ -135,13 +133,29 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
         resolved
     };
 
-    // Attempt to persist every object. We report a single
-    // "unpack ok" or "unpack <reason>" based on whether ALL
-    // object writes succeeded.
+    // Stream the request body. We read JUST the command list bytes
+    // (pkt-line framed; ends at a 0000 flush), then hand the same
+    // reader to the pack parser so the rest of the body never needs
+    // to be buffered. Memory peak across this whole flow is one
+    // object's body + the command list (typically a few KiB).
+    let mut reader = std::io::BufReader::with_capacity(
+        BUFREAD_CAPACITY,
+        WasmRequestReader::new(http.request_body()),
+    );
+    let cmd_bytes = read_command_list(&mut reader)?;
+    let parsed = commands::parse_commands(&cmd_bytes)
+        .map_err(|e| format!("parse_commands: {e}"))?;
+
     let mut unpack_status = "ok".to_string();
     let mut per_obj_errors: Vec<String> = Vec::new();
+    let mut object_count = 0u32;
 
-    for obj in &objects {
+    let mut parser =
+        pack::StreamingPackParser::begin(reader).map_err(|e| format!("pack header: {e}"))?;
+    while let Some(obj) = parser
+        .next_object()
+        .map_err(|e| format!("pack next: {e}"))?
+    {
         let (kind_prefix, entity_set) = match obj.kind {
             pack::ObjectKind::Blob => ("blob", "Blobs"),
             pack::ObjectKind::Tree => ("tree", "Trees"),
@@ -161,8 +175,8 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
         match post_json(ctx, &principal, &url, &body_json) {
             Ok(resp) if (200..400).contains(&resp.status) => {}
             Ok(resp) => {
-                // 409 is idempotent success (object already stored).
                 if resp.status == 409 {
+                    object_count += 1;
                     continue;
                 }
                 unpack_status = format!("error status {} on {sha}", resp.status);
@@ -173,6 +187,14 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
                 per_obj_errors.push(format!("{sha}:{e}"));
             }
         }
+        object_count += 1;
+        // `obj.data` and `canonical` drop here — only the next
+        // object's bytes will be live in WASM memory.
+    }
+    // Verify the trailer — only meaningful if every object decoded.
+    if let Err(e) = parser.finish() {
+        unpack_status = format!("trailer: {e}");
+        per_obj_errors.push(format!("trailer:{e}"));
     }
 
     // Apply ref updates. Each command produces a per-ref status line.
@@ -239,7 +261,7 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
 
     Ok(json!({
         "commands": parsed.commands.len(),
-        "objects": objects.len(),
+        "objects": object_count,
         "unpack_status": unpack_status,
         "ref_statuses": ref_statuses
             .iter()
@@ -467,23 +489,68 @@ fn sha_from_prefix(prefix: &str, body: &[u8]) -> String {
     hasher.hex()
 }
 
-fn read_full_body(http: &InboundHttp) -> Result<Vec<u8>, String> {
-    let mut body = Vec::new();
-    let mut scratch = alloc::vec![0u8; READ_CHUNK_BYTES];
-    let mut reader = http.request_body();
-    loop {
-        match reader.read_next_chunk(&mut scratch) {
-            Ok(None) => break,
-            Ok(Some(n)) => {
-                if body.len() + n > MAX_BODY_BYTES {
-                    return Err(format!("request body exceeds {MAX_BODY_BYTES} bytes"));
-                }
-                body.extend_from_slice(&scratch[..n]);
-            }
-            Err(e) => return Err(format!("request_body read: {e}")),
+/// `std::io::Read` adapter over the SDK's inbound body reader. Used
+/// to drive the streaming pack parser without ever materialising the
+/// full pack in WASM memory.
+struct WasmRequestReader {
+    inner: temper_wasm_sdk::http_stream::HttpResponseBodyReader,
+}
+
+impl WasmRequestReader {
+    fn new(inner: temper_wasm_sdk::http_stream::HttpResponseBodyReader) -> Self {
+        Self { inner }
+    }
+}
+
+impl std::io::Read for WasmRequestReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        match self.inner.read_next_chunk(out) {
+            Ok(None) => Ok(0),
+            Ok(Some(n)) => Ok(n),
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("{e}"),
+            )),
         }
     }
-    Ok(body)
+}
+
+/// Read pkt-line packets from `reader` until the `0000` flush that
+/// ends the receive-pack command list. Returns the consumed bytes
+/// (including the flush) so they can be handed verbatim to
+/// `parse_commands`. The reader is positioned at the first pack byte
+/// when this returns.
+fn read_command_list<R: std::io::BufRead>(reader: &mut R) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    loop {
+        if out.len() >= COMMAND_LIST_MAX_BYTES {
+            return Err(format!(
+                "command list exceeds {COMMAND_LIST_MAX_BYTES} bytes"
+            ));
+        }
+        let mut len_buf = [0u8; 4];
+        reader
+            .read_exact(&mut len_buf)
+            .map_err(|e| format!("read pkt length: {e}"))?;
+        out.extend_from_slice(&len_buf);
+        let len_str = core::str::from_utf8(&len_buf)
+            .map_err(|e| format!("pkt length not ASCII: {e}"))?;
+        let pkt_len = usize::from_str_radix(len_str, 16)
+            .map_err(|e| format!("pkt length not hex: {e}"))?;
+        if pkt_len == 0 {
+            // Flush — end of command list.
+            return Ok(out);
+        }
+        if pkt_len < 4 {
+            return Err(format!("pkt length {pkt_len} below 4-byte header"));
+        }
+        let payload_len = pkt_len - 4;
+        let prev = out.len();
+        out.resize(prev + payload_len, 0);
+        reader
+            .read_exact(&mut out[prev..])
+            .map_err(|e| format!("read pkt payload: {e}"))?;
+    }
 }
 
 fn respond_text(
