@@ -56,9 +56,10 @@ integrity).
 
 ### Streaming everywhere
 
-1. **Pack upload/download is streaming.** A clone of the darkhelix-users repo
-   may be hundreds of MB. WASM must not buffer a full pack in memory.
-   Consume input with chunked reads; emit output with chunked writes.
+1. **Pack upload/download is streaming.** A clone of a non-trivial
+   repo may be hundreds of MB. WASM must not buffer a full pack in
+   memory. Consume input with chunked reads; emit output with chunked
+   writes.
 
 2. **HTTP responses for protocol handlers set `Transfer-Encoding: chunked`**
    on responses with unknown content-length. Smart-HTTP expects this.
@@ -131,34 +132,21 @@ integrity).
    github.com response (field names, types, required presence). The
    comparison ignores values but asserts structural compatibility.
 
-### Storage (per ADR-0004)
+### Storage
 
-1. **Per-repo libSQL DB is the only storage.** No spill tier, no
-   separate blob store. Blob content lives in the Blob row as a SQLite
-   BLOB column. Do not add a secondary content-addressed store; if
-   we ever need one (for chunked >1 GB blobs), it goes through a new
-   ADR.
+1. **Storage goes through Temper's event-store abstraction.** Entity
+   writes dispatch through the kernel; the physical backend (embedded
+   SQLite, libSQL, Postgres) sits behind that abstraction. Don't
+   reach around it to the backend directly.
 
-2. **Every write is a single libSQL transaction.** A git push that
-   creates N blobs + M trees + one commit + advances a ref is ONE
-   transaction on that repo's DB. Either it all lands or none lands.
-   If you're tempted to split this into multiple POST requests
-   without transaction grouping, stop — `temper-store-turso` exposes
-   batch semantics.
+2. **A push is a single transactional write.** A push that creates
+   N blobs + M trees + one commit + advances a ref must either all
+   land or none land. Use the batch semantics the kernel exposes;
+   never split the write into multiple uncoordinated POSTs.
 
 3. **Never hold a whole pack in memory.** Pack sizes can reach
-   hundreds of MB. Use streaming readers on the incoming side;
-   stream BLOBs into libSQL via prepared statements with chunked
-   bind. Don't materialize the full BLOB on the WASM heap.
-
-4. **Vendor abstraction is sacred.** All storage access goes through
-   `temper-store-turso::TursoEventStore`. Never import `libsql-*`
-   crates directly in temper-git code — that would couple us to
-   self-hosted and break the Turso-Cloud-swap contract.
-
-5. **HMAC credentials are never logged.** `AWS_ACCESS_KEY_ID` and
-   `AWS_SECRET_ACCESS_KEY` (the GCS interop credentials) pass through
-   env only. Never emit them in trace, span tags, or error messages.
+   hundreds of MB. Stream on the incoming side; stream on the
+   outgoing side. Don't materialize full packs on the WASM heap.
 
 ### No-goes
 
@@ -172,14 +160,12 @@ integrity).
   Caching is Temper's job (it already caches entity state). A second
   layer means cache invalidation becomes our problem and introduces
   divergence risk.
-- **Do not introduce a second blob-storage tier.** ADR-0004 explicitly
-  rejected spill-to-separate-store. BLOB content lives in the SQLite
-  row. If you believe this is wrong for a specific case, write a new
-  ADR superseding ADR-0004 — don't patch around it.
+- **Do not introduce a second blob-storage tier.** Blob content lives
+  in the entity row. If a specific use case needs chunking or a spill
+  tier, write an ADR first.
 - **Do not support git-annex, git-lfs, or sub-modules in v1.** Submodules
   are in scope for v2 (just another blob-like pointer).
 - **Do not emit pack-v1.** Not even as fallback. Modern git clients all
   speak v2.
-- **Do not couple to the self-hosted libsql-server deployment in
-  application code.** Everything goes through the libSQL wire protocol.
-  Swap to Turso Cloud must remain a single-Secret change.
+- **Do not couple to a specific storage backend in application code.**
+  Everything goes through the kernel's event-store abstraction.

@@ -50,15 +50,16 @@ PRs that skip any of these for "small changes" don't merge.
   `specs/`, `wasm-modules/git_*/`, or `wasm-modules/github_*/`.
 - Docs-only PRs (`docs/`, `CLAUDE.md`, `README.md`) can land with one
   signoff.
-- Kernel deltas (against `temper/` submodule) require upstream
-  approval — see CLAUDE.md for the policy.
+- Kernel-level changes go into Temper first, then the submodule
+  pointer here bumps — never patch `temper/` files on a temper-git
+  branch.
 
 ## Getting started
 
-Right now there's no code — the project is in design phase. If you want
-to contribute:
+See the [README quickstart](README.md#quickstart-local) for a
+three-terminal local setup. To dig into design:
 
-1. Review [docs/rfc/0001-temper-git-v1-architecture.md](docs/rfc/0001-temper-git-v1-architecture.md).
-2. Leave review comments or open counter-proposals.
-3. Once RFC-0001 is accepted, Phase 1 work opens up; watch for "good
-   first tickets" under the `phase-1/` label.
+1. Read [VISION.md](VISION.md) and the ADRs.
+2. Skim [docs/rfc/0001-architecture.md](docs/rfc/0001-architecture.md)
+   and [docs/rfc/0002-push-and-clone.md](docs/rfc/0002-push-and-clone.md).
+3. Open an issue or a draft PR.

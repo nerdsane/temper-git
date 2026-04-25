@@ -5,7 +5,8 @@
 Accepted — 2026-04-21. Establishes the testable compatibility contract for
 temper-git's wire protocol and object serialization. Paired with
 [ADR-0001](0001-temper-git-mission.md) (mission) and
-[ADR-0002](0002-temper-native-scm.md) (Temper-native SCM).
+[ADR-0002](0002-temper-native-version-control.md) (Temper-native
+version control).
 
 ## Context
 
@@ -140,7 +141,7 @@ state. Only the response *shape* matters for tooling compat.
    Every ref hash in `b.refs` appears identically in `a.refs`.
 
 4. **GitHub API shape tests.** For every REST endpoint listed in
-   [RFC-0001 §"REST surface"](../rfc/0001-temper-git-v1-architecture.md),
+   [RFC-0001 §"REST surface"](../rfc/0001-architecture.md),
    a fixture pair `(gh_fixture.json, temper_response.json)` with a
    `assert_compatible_shape()` helper that walks both and asserts
    every github-field appears in our response with the right type.
@@ -213,11 +214,8 @@ shapes match github.com structurally.
 ## References
 
 - [ADR-0001](0001-temper-git-mission.md)
-- [ADR-0002](0002-temper-native-scm.md)
-- [ADR-0004](0004-per-repo-libsql-gcs.md) — per-repo libSQL storage; BLOB
-  bytes are round-trip-tested for hash-byte-match against the same harness
-  regardless of storage vendor.
-- [RFC-0001](../rfc/0001-temper-git-v1-architecture.md)
+- [ADR-0002](0002-temper-native-version-control.md)
+- [RFC-0001](../rfc/0001-architecture.md)
 - [CODING_GUIDELINES.md](../../CODING_GUIDELINES.md) — hash-integrity, canonical serialization rules
 - Git object format: https://git-scm.com/book/en/v2/Git-Internals-Git-Objects
 - Git hash-object behavior: https://git-scm.com/docs/git-hash-object

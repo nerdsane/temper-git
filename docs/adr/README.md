@@ -9,18 +9,14 @@ temper-git uses MADR (Markdown Architectural Decision Records).
 
 ## Accepted
 
-- [0001-temper-git-mission.md](0001-temper-git-mission.md) — temper-git is a
-  self-contained, Temper-native, GitHub-compatible SCM. Supersedes the
-  nginx+CGI git host in dark-helix.
-- [0002-temper-native-scm.md](0002-temper-native-scm.md) — SCM state is IOA
-  entities; protocol handlers are WASM integrations. No host-side Rust
-  extensions.
-- [0003-byte-exact-git-compat.md](0003-byte-exact-git-compat.md) — byte-exact
-  git compatibility is a product guarantee, enforced by CI.
-- [0004-per-repo-libsql-gcs.md](0004-per-repo-libsql-gcs.md) — storage is
-  a per-repo libSQL database with WAL shipped to GCS. Self-hosted
-  libsql-server for air-gapped sandbox; Turso-Cloud-swappable via
-  env-var change.
+- [0001-temper-git-mission.md](0001-temper-git-mission.md) — build a
+  version-control experiment tailored for Dark Factories rather than
+  adapting an existing tool.
+- [0002-temper-native-version-control.md](0002-temper-native-version-control.md)
+  — version-control state lives in IOA entities; protocol handlers are
+  WASM integrations. No host-side Rust extensions.
+- [0003-byte-exact-git-compat.md](0003-byte-exact-git-compat.md) —
+  byte-exact git compatibility is a product guarantee, enforced by CI.
 
 ## Proposed
 

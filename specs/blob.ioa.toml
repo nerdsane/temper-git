@@ -5,10 +5,9 @@
 # `canonical/src/blob.rs` for the emitter that produces those bytes
 # byte-exactly against `git hash-object`).
 #
-# Storage substrate (ADR-0004): inline SQLite BLOB column in the repo's
-# own libSQL database. No spill tier. Content up to SQLite's BLOB max
-# (~1 GiB default, configurable to ~2.1 GiB); >1 GiB blobs need
-# chunking which is out of scope for v1 (RFC-0001 §Open questions).
+# Content lives inline on the entity row. No spill tier. Very large
+# blobs (e.g. ML models, >1 GiB) would need chunking; out of scope
+# for v1 (RFC-0001 §Open questions).
 #
 # Append-only semantics (Cedar denies PATCH/DELETE). A repository
 # garbage-collect action (future, Phase 2) will be the only legitimate

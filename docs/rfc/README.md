@@ -9,13 +9,11 @@ temper-git uses RFCs for design proposals ahead of implementation.
 
 ## Open for review
 
-- [0001-temper-git-v1-architecture.md](0001-temper-git-v1-architecture.md) —
-  v1 concrete architecture: entity model, WASM integrations, kernel
-  deltas (HttpEndpoint + streaming WASM I/O), storage substrate
-  (per-repo libSQL + GCS-backed WAL; see
-  [ADR-0004](../adr/0004-per-repo-libsql-gcs.md)), deployment topology,
-  and the four-phase delivery plan. Amended 2026-04-21 to land
-  ADR-0004.
+- [0001-architecture.md](0001-architecture.md) — v1 architecture: entity
+  model, WASM integrations, kernel primitives (HttpEndpoint + streaming
+  WASM I/O), auth flow, phase plan.
+- [0002-push-and-clone.md](0002-push-and-clone.md) — remaining slices
+  for full `git push` + `git clone` against populated repositories.
 
 ## Accepted
 

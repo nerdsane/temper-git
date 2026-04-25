@@ -1,16 +1,17 @@
-# ADR-0002: SCM state is IOA entities; protocol handlers are WASM integrations
+# ADR-0002: Version-control state is IOA entities; protocol handlers are WASM integrations
 
 ## Status
 
-Accepted — 2026-04-21. Establishes the core architectural contract for
-temper-git's internals. Paired with [ADR-0001](0001-temper-git-mission.md)
-(mission) and [ADR-0003](0003-byte-exact-git-compat.md) (compat gate).
+Accepted. Establishes the core architectural contract for temper-git's
+internals. Paired with [ADR-0001](0001-temper-git-mission.md) (mission)
+and [ADR-0003](0003-byte-exact-git-compat.md) (compat gate).
 
 ## Context
 
-We've decided (ADR-0001) that temper-git is a Temper-native product with
-GitHub-compatible surface. This ADR fixes the next-level question: *what
-lives in IOA entities, what lives in WASM, and how do they compose?*
+We've decided in [ADR-0001](0001-temper-git-mission.md) to build
+temper-git as a Temper-native experiment with GitHub-compatible surface.
+This ADR fixes the next-level question: *what lives in IOA entities,
+what lives in WASM, and how do they compose?*
 
 The temptation is to cut corners. Three shapes were considered:
 
@@ -98,12 +99,9 @@ its response back.
 ### Separation of concerns
 
 - **IOA entities own state.** They are the durable, canonical
-  representation. Nothing else is. Physical storage is a per-repo
-  libSQL database with WAL frames shipped to GCS; see
-  [ADR-0004](0004-per-repo-libsql-gcs.md). The separation contract
-  holds regardless of substrate — if we later swap libSQL for Turso
-  Cloud (same wire protocol, different vendor), the entity model and
-  WASM integrations are unchanged.
+  representation. Nothing else is. The physical storage backend sits
+  behind the kernel's event-store abstraction; the entity model and
+  WASM integrations don't depend on which backend is in use.
 - **WASM integrations own protocol.** They are stateless (aside from
   in-request working memory). They translate between
   smart-HTTP/REST/GraphQL and OData actions.
@@ -111,7 +109,7 @@ its response back.
   manages actor lifecycle, persists state via the storage backend.
 
 A `git push` looks like:
-1. Client: `POST /darkhelix-users.git/git-receive-pack` with pack body.
+1. Client: `POST /{owner}/{repo}.git/git-receive-pack` with pack body.
 2. Kernel routes to `git_receive_pack` WASM.
 3. WASM parses the pack, computes SHA-1 for each object, emits
    `POST /tdata/Blobs`, `POST /tdata/Trees`, `POST /tdata/Commits` to
@@ -133,8 +131,8 @@ No bare repo on disk at any step. No second source of truth.
   GitToken, HttpEndpoint, etc. compose naturally. No parallel access
   control in nginx or a separate auth proxy.
 - **One audit trail.** Every action — including raw wire-protocol pushes —
-  emits a trajectory entry. The existing Datadog wiring on Temper gets
-  a unified "git activity" view for free.
+  emits an event. A "git activity" view is a query over the event
+  store, not a separate log-aggregation layer.
 - **One verification cascade.** If a new Repository spec adds a
   cross-invariant ("every Commit's parent must exist in the same
   repo"), Temper's L0–L3 cascade runs it.
@@ -201,9 +199,6 @@ verification, everything is symmetric.
 
 - [ADR-0001](0001-temper-git-mission.md) — mission
 - [ADR-0003](0003-byte-exact-git-compat.md) — compat gate
-- [ADR-0004](0004-per-repo-libsql-gcs.md) — per-repo libSQL storage
-- [RFC-0001](../rfc/0001-temper-git-v1-architecture.md) — v1 design
-- [temper/CLAUDE.md](../../temper/CLAUDE.md) — kernel discipline
-- Temper ADR-0002 (dark-helix): "Temper-only control plane"
+- [RFC-0001](../rfc/0001-architecture.md) — v1 design
 - Git object format: https://git-scm.com/book/en/v2/Git-Internals-Git-Objects
 - Git smart-HTTP: https://git-scm.com/docs/http-protocol

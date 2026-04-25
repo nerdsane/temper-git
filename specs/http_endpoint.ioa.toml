@@ -1,18 +1,5 @@
 # HttpEndpoint — register a WASM integration as a route handler.
 #
-# ## Status — KERNEL DELTA
-#
-# This entity is a new Temper-kernel feature, not an app-level concept.
-# It needs to land in upstream Temper (github.com/nerdsane/temper)
-# before temper-git can actually register routes. See
-# RFC-0001 §"Kernel deltas" (K-1).
-#
-# In the temper-git os-app bundle this file is aspirational — it
-# documents the contract we need. When the upstream kernel patch lands
-# (owning the router additions + the Cedar surface for it), this file
-# moves up to the kernel's `temper-platform/src/specs/` and this app
-# bundle uses it via the standard OS-app merge.
-#
 # ## Contract
 #
 # Registered HttpEndpoints extend the router's match set. On request,

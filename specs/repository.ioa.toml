@@ -1,11 +1,8 @@
 # Repository — the umbrella entity for a git repo hosted on temper-git.
 #
-# Every Repository gets its own libSQL database (ADR-0004); the
-# Repository row on the control-plane DB carries the metadata and
-# provisioning state of that repo's dedicated storage. A
-# `repository_provision` WASM integration fires on `Create` to
-# actually spin the per-repo DB via libsql admin API and backfill
-# the `LibsqlDbName` field.
+# The Repository row carries metadata and provisioning state for the
+# repo's storage. A `repository_provision` WASM integration fires on
+# `Create` to do any backend-specific setup the kernel needs.
 #
 # State machine:
 #
@@ -143,7 +140,6 @@ on_success = "MarkProvisioned"
 on_failure = "Archive"
 
 [integration.config]
-libsql_admin_url = "http://libsql-server.temper-git.svc.cluster.local:8080"
 timeout_secs = 30
 
 [[integration]]

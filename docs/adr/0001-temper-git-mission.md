@@ -1,209 +1,208 @@
-# ADR-0001: temper-git is a self-contained, Temper-native, GitHub-compatible SCM
+# ADR-0001: Build a version-control experiment for Dark Factories
 
 ## Status
 
-Accepted — 2026-04-21. Supersedes the temper-git pod in the dark-helix
-factory (nginx + fcgiwrap + git-http-backend over a PVC of bare repos).
+Accepted — this is the project's foundational decision. Implementation
+is in progress; the claims here are intentionally bounded to what we've
+had to decide, not what we've proven.
 
 ## Context
 
-The dark-helix factory hosts three agent cohorts — operators, users, builders
-— on Temper Managed Agents. Every cohort needs to read and write source code:
-users maintain kafka client apps, builders turn operator `Observation`s into
-pull requests against the factory's own specs, operators draft playbook
-updates. The existing git host in the factory cluster is an nginx pod with
-fcgiwrap wrapping `git-http-backend`, reading and writing bare repos on a
-PersistentVolumeClaim.
+A Dark Factory, as we're using the term, is a software system where
+autonomous agents produce code continuously, at machine rate, with
+humans supervising through an evolution record (observation, problem,
+analysis, decision, insight) rather than a ticket queue. We're building
+one. Every cohort of agents in it — the ones producing tools, the ones
+exercising them, the ones reviewing each other's work — needs to read
+and write source code.
 
-That pod works for standard git clients — `git clone`, `git push`, `git pull`
-from a developer laptop all succeed. But it has three fundamental problems
-for the factory:
+The standard answer is GitHub (or a self-hosted equivalent serving the
+git wire protocol over a filesystem of bare repos). That answer works
+for developer laptops and for most CI pipelines. Three things about it
+felt awkward in the Dark Factory setting, enough to make us look at
+alternatives:
 
-1. **Agents can't write to it.** Agents run in WASM. WASM cannot open TCP
-   sockets, cannot run a git binary, cannot implement the smart-HTTP pack
-   upload protocol without ~1000 lines of bit-level parsing code that
-   doesn't belong in a WASM guest. The practical consequence: every one of
-   our agent tools that tries to mutate code returns `{error: "unsupported"}`
-   and the PR-flow loop is only theoretical.
+1. **The primary writer is a program, not a human.** Agents in our
+   setup run inside a sandbox without direct network sockets or a
+   forkable git binary. They can reach out through a small set of
+   capability-scoped host functions. Implementing the smart-HTTP pack
+   upload protocol inside a sandbox is possible but large; giving the
+   sandbox a git binary undoes the isolation; and neither option
+   integrates with the rest of the system's authorization and audit
+   machinery. This is solvable — every Dark Factory that uses GitHub
+   today solves it — but the solutions are specific to git's
+   client/server asymmetry rather than emerging naturally from the
+   agent architecture.
 
-2. **Two sources of truth.** If we bolt a write API onto nginx (a CGI
-   shim, or a REST layer), agents can now write via the shim while humans
-   write via git-smart-HTTP. The bare repo on the PVC is one representation;
-   every "audit trail" we build on top (PR entities, review entities, commit
-   entities) lives in Temper as a second, out-of-band representation. Merge
-   semantics, history integrity, and Cedar policy enforcement all drift
-   between the two.
+2. **State for the repository lives in two places.** Git objects are
+   on a filesystem; pull requests, reviews, and the conversations
+   around them are in a database behind a separate API. They relate by
+   reference. Every feature that touches both has to reconcile them:
+   branch-protection rules against commit author identity, review
+   state against merge eligibility, webhook delivery against repo
+   visibility. Each reconciliation is correct in isolation; we found
+   ourselves wondering what it would look like if they were all
+   expressed in the same substrate.
 
-3. **Evolution chain lives in Temper; code lives outside Temper.** Our
-   Observation / Problem / Analysis / PullRequest chain is Temper-native.
-   The PR references a branch in a repo — but the repo is opaque to
-   Temper. An agent cannot express "read the file this PR wants to change"
-   without leaving the Temper OData surface. That breaks the Temper-only
-   control plane rule (dark-helix ADR-0002).
+3. **The audit record is partial.** Git's reflog is local; GitHub's
+   activity feed is excellent for humans but was not designed to be
+   queried as a primary operational surface. For a Dark Factory
+   operator, the question "what did which agent do on which repository
+   in the last hour" is the common case, not an edge case, and it's
+   the kind of query that wants to run directly against the
+   authoritative log.
 
-Three options were seriously considered:
+None of these are criticisms of git or GitHub. They are both
+extraordinary pieces of infrastructure; their conventions are a large
+part of why software engineering moves as fast as it does, and our
+project preserves those conventions wherever we can. The three points
+above describe a mismatch between a general-purpose tool and a narrow
+workload, not a defect in the tool.
 
-### Option A: Patch the existing nginx pod with a write-capable REST shim
+We considered three approaches.
 
-Add an nginx `location /_internal/write_file/...` + a CGI shell script
-that clones, commits, pushes on behalf of the agent. Cheapest option in
-elapsed time (a day of work). Keeps git-smart-HTTP for humans.
+### Option A: Adapt a self-hosted git server with a write API
 
-Rejected because: two sources of truth persist. The PVC bare repo is
-authoritative for git clients; the REST shim is authoritative for agents;
-Temper entities for PullRequest/Review etc. are a third view. Every
-future feature (branch protection, merge queue, webhook delivery) has to
-handle all three surfaces consistently. That's the road to nowhere.
+Stand up a standard git server and add a small REST layer that lets
+the sandboxed agents mutate content indirectly: a "write file" endpoint
+that clones, commits, and pushes on the agent's behalf. Lowest
+upfront cost — a day or two of work.
 
-### Option B: Temper's `Memory` entity as the substrate
+We passed on this because the two-sources-of-truth problem
+intensifies: the bare repo is authoritative for human clients, the
+REST shim is authoritative for agents, and the pull-request /
+review / branch-protection entities live in a third system. Every
+future feature has to be reconciled across all three. The short-term
+savings compound into long-term friction.
 
-Use Temper's existing `Memory` + `MemoryVersion` entities as the
-writable surface for agent-authored content. Each Memory row has a
-`Path`, `Content`, version chain. Agents mutate via plain OData. Later,
-a sync controller mirrors Memory rows → temper-git bare repos.
+### Option B: Model content in an existing entity type
 
-Rejected because: humans can't `git clone` a Memory. The git protocol
-is still served by the nginx pod from bare repos, which are now a
-derived second system that eventual-consistency mirrors from Memory.
-The sync controller is hard to make bulletproof; partial syncs leave
-the factory in a state where "the code" is different depending on
-whether you're asking an agent or a human. Also Memory was designed
-for agent-remembered-state (playbooks, instructions), not source code;
-overloading it conflates "what the agent is told" with "what the
-agent authors."
+Use the kernel's generic "named blob with versions" entity as the
+writable surface for agent-authored content, and keep a standard git
+server as a read mirror maintained by a sync controller. Humans
+`git clone` from the mirror; agents write via the entity's OData
+surface.
 
-### Option C: Build a full Temper-native SCM as its own product (chosen)
+We passed on this because the sync controller becomes a durability
+bottleneck we don't fully trust — partial syncs can leave the system
+in a state where "the code" means different things to agents and
+humans. The generic entity is also designed for agent-remembered
+state (playbooks, scratchpads) rather than content with git's
+specific invariants around object identity, merge semantics, and
+ref history; overloading it felt like a category error.
 
-Stand up temper-git as a self-contained project. Bundle Temper's
-kernel. Write a GitHub-compatibility OS app that models every git
-concept — blobs, trees, commits, refs, tags, pull requests, reviews,
-tokens — as first-class IOA entities. Implement the git smart-HTTP
-wire protocol as WASM integration modules that parse/emit packs
-directly from entity state. Implement the GitHub REST v3 API as
-another set of WASM integrations translating REST calls into OData
-actions on those entities. No bare repos on disk. No second source of
-truth.
+### Option C: Build a purpose-specific version control experiment
+
+Model every git object — blob, tree, commit, tag, ref — as a
+first-class entity with its own state machine, and serve the git
+wire protocol from those entities directly. Keep byte-exact
+compatibility with the real git binary so any existing tool works
+unchanged. Keep the pull-request / review / comment surface in the
+same entity model as the objects it points at.
+
+This is the option we took.
 
 ## Decision
 
-**We build temper-git as a self-contained product, separate from
-dark-helix, bundling the Temper kernel as a submodule and implementing a
-full GitHub-compatible SCM on top.** Every git object — blob, tree,
-commit, tag, ref — is an IOA entity. Wire protocol and REST are WASM
-integrations. Byte-exact git compatibility is mandatory: every object
-emitted must hash identically to what `git hash-object` produces.
+We're building **temper-git** as a stand-alone experiment in version
+control designed for the Dark Factory workload. Every git object is an
+entity with a state machine. Authorization is policy-as-code,
+evaluated at every transition. The event log is authoritative. The
+git wire protocol is preserved byte-for-byte.
 
-### What this commits us to
+### What the decision commits us to
 
-- **A sibling project** at `~/Development/temper-git/`, not a subdirectory
-  of dark-helix. Own Cargo workspace, own Dockerfile, own K8s deployment,
-  own libSQL + GCS-backed storage substrate (see
-  [ADR-0004](0004-per-repo-libsql-gcs.md)), own release cadence.
-- **The temper/ submodule** pinned at a specific upstream Temper commit.
-  We do not fork Temper's kernel; we extend it via OS app + WASM.
-- **Per-repo libSQL database + GCS-backed WAL.** See
-  [ADR-0004](0004-per-repo-libsql-gcs.md). Self-hosted libsql-server
-  for air-gapped GCP sandbox operation; swap-path to Turso Cloud via
-  env-var change with zero code diff.
-- **Byte-exact compatibility** — every third-party git tool must work
-  against temper-git without modification. GitHub REST v3 response shapes
-  must match github.com structurally.
-- **Phased delivery** (see ADR-0003 and RFC-0001 for the cuts):
-  - Phase 1 — Foundation: entity model, pack v2 emitter/parser, full
-    upload-pack + receive-pack, core REST (contents, pulls, refs,
-    merges), GitToken auth.
-  - Phase 2 — Production hardening: delta compression, thin packs,
-    webhooks, remaining REST endpoints, branch protection.
-  - Phase 3 — Modern surface: GraphQL v4, OAuth apps.
-  - Phase 4 — Migration: importer for existing bare repos from the old
-    temper-git pod; decommissioning the old pod.
+- A stand-alone project with its own release cycle. The kernel it
+  builds on ([Temper](https://github.com/nerdsane/temper)) is a
+  submodule pinned to a specific upstream commit; we do not fork it,
+  we extend it with an app bundle and with protocol handlers compiled
+  to WASM.
+- Byte-exact compatibility with real git — every object we emit must
+  hash identically to what `git hash-object` produces, every
+  advertisement and pack stream we produce must parse cleanly in the
+  real `git` binary. We hold ourselves to this with integration tests
+  that shell out to a real git, documented in
+  [ADR-0003](0003-byte-exact-git-compat.md).
+- A phased delivery we can walk back from if the core premise doesn't
+  hold. The current phases are roughly: (1) ref advertisement and
+  empty-repo clone, (2) `git push` landing objects as entities and
+  `git clone` emitting packs from them, (3) GitHub-shaped REST
+  endpoints for tooling compatibility, (4) hardening and operator
+  workflows. We are currently between phase 1 and phase 2.
 
-### What this does NOT commit us to
+### What the decision does not commit us to
 
-- A public-internet GitHub alternative. temper-git is a cluster-internal
-  service; external exposure is a user's deployment choice.
-- A GitHub web UI replica. Humans browse via the Observe UI's
-  (separately-shipped) code-view widget or set up outbound read-only
-  mirrors to github.com / Gitea.
-- Git LFS support.
-- Git "fork" semantics. Repos can be duplicated via an OData action, but
-  forks aren't a first-class feature.
+- A replacement for GitHub as a public collaboration platform. This
+  is version control tailored for a specific operational pattern,
+  not a product play against an established one.
+- A browser-based code browsing UI. For now, humans who want to
+  browse the code read it through git clients or through outbound
+  read-only mirrors on github.com.
+- Git LFS, submodule-first workflows, or "fork" semantics as a
+  first-class feature. These might come later if the experiment goes
+  well; they are not goals for v1.
 
-## Consequences
+## Consequences we expect
 
-### Easier
+### What gets easier
 
-- Agents in WASM get a writeable source-control surface with a three-line
-  tool: `POST /api/v3/repos/{o}/{r}/contents/{p}`. No pack protocol in
-  WASM. No special case for "the git server is different from
-  everything else."
-- The evolution chain terminates in code: Observation → Problem →
-  Analysis → PullRequest → merged Commit, all in one substrate. An
-  agent can walk the chain via OData without leaving Temper.
-- Every mutation is Cedar-gated and trajectory-emitted. The
-  verification cascade governs git operations the same way it governs
-  any IOA transition.
-- Mirror-compatibility is free: `git push --mirror` against a
-  byte-exact server produces identical hashes. Humans keep read-only
-  mirrors on github.com/Gitea for browsing, and those mirrors are
-  maintained by ordinary git tooling.
+- The agent's writing path doesn't have to understand git's
+  transport protocol — it issues entity actions and the same
+  authorization layer that handles every other action in the system
+  handles these too. Our sandboxed agents can mutate source code
+  with no new capability surface.
+- The evolution chain terminates in code: an observation can point
+  at an analysis, which can point at a pull request, which can
+  point at a commit, all in one queryable substrate. An agent can
+  walk from a production signal to the line of code responsible for
+  it without leaving a single query protocol.
+- The audit record is uniform and replayable. Every mutation is an
+  event in the authoritative log; "what happened at 3am last
+  Tuesday" is answerable by replaying the log, not by joining
+  across systems.
+- Mirror compatibility comes for free from byte-exactness. A
+  `git push --mirror` to a regular git host produces identical
+  hashes, so the same repository can be maintained as a read-only
+  mirror on github.com with no special tooling.
 
-### Harder
+### What gets harder
 
-- **Implementation cost.** A byte-exact git server is 4+ weeks of focused
-  work. Pack-v2 parsing and emission, zlib framing, SHA-1 object
-  serialization, smart-HTTP negotiation, delta encoding (Phase 2). Each
-  piece must match git-core's behavior exactly; there's no room for
-  "close enough."
-- **Maintenance cost.** git-core ships new versions; GitHub ships new
-  REST/GraphQL fields; mirror tools find edge cases we didn't test for.
-  This is now a product we maintain.
-- **Surface area.** GitHub's REST API is ~800 endpoints. GraphQL has
-  thousands of field combinations. We implement a subset; we accept that
-  some third-party tools will hit endpoints we don't implement and fail.
-  The subset we *do* implement must be rock-solid.
-- **Coupling to Temper upstream.** If Temper upstream changes OData
-  semantics, WASM host API, or action dispatch, we need to follow. We
-  mitigate by pinning the submodule and explicit upgrade reviews.
+- We are now responsible for byte-exact serialization of git's
+  object format and for the correctness of the wire protocol.
+  The real `git` binary has absorbed two decades of edge cases
+  that we have to re-encounter and match. Our discipline is to
+  test against it rather than against ourselves.
+- GitHub's REST API is a large, living surface. We will implement
+  a subset; tools that hit endpoints we don't implement will
+  fail. The subset we do implement has to be solid.
+- Coupling to the kernel's upstream evolution. If the kernel's
+  host functions or action dispatch change, we have to follow. We
+  mitigate with a pinned submodule and deliberate upgrades, not by
+  forking.
 
-## Options Considered
+### What we don't know yet
 
-### Option 1: Patch-nginx (rejected)
+- Whether the entity-model-for-git-objects premise holds at scale.
+  Single-repo experiments look clean; we haven't stress-tested
+  the pattern under the load of a repository with tens of
+  thousands of commits or tens of concurrent pushing agents.
+- Whether policy-as-code applied per transition is easier to
+  reason about than GitHub's branch-protection + webhook + review
+  integration model, or whether we're just relocating the
+  complexity.
+- Whether Dark Factories, as a pattern, is distinct enough from
+  "a team of humans using GitHub well" to justify a
+  purpose-specific tool. The whole pitch of this project assumes
+  the answer is yes; we don't have a definitive answer yet.
 
-See Context above. Two sources of truth long-term. Short-term win, long-term
-dead end.
-
-### Option 2: Memory-entity substrate (rejected)
-
-See Context above. Humans can't `git clone` a Memory row. Conflates
-agent-remembered-state with source code.
-
-### Option 3: Self-contained temper-git product (chosen)
-
-**Pros:**
-- One source of truth.
-- Full git ecosystem compatibility for humans and third-party tools.
-- Agent writes are first-class IOA transitions with Cedar + audit.
-- Temper-only control plane rule is preserved.
-- Mirror-friendly by construction (byte-exact hashes guarantee it).
-
-**Cons:**
-- Significant initial implementation effort (~4 weeks foundation).
-- Ongoing maintenance of a git-protocol and GitHub-API-compatible
-  surface. This is a product now, not a glue layer.
-- Divergence risk if Temper upstream evolves; mitigated by submodule
-  pinning.
+We are taking the bet knowing these are open.
 
 ## References
 
-- [ADR-0004: Per-repo libSQL with GCS-backed WAL](0004-per-repo-libsql-gcs.md) —
-  storage substrate decision that operationalizes this mission for an
-  air-gapped GCP deployment.
 - [VISION.md](../../VISION.md)
-- [ADR-0002: Temper-native SCM substrate](0002-temper-native-scm.md)
+- [ADR-0002: Version control as an entity model](0002-temper-native-version-control.md)
 - [ADR-0003: Byte-exact git compatibility](0003-byte-exact-git-compat.md)
-- [RFC-0001: temper-git v1 architecture](../rfc/0001-temper-git-v1-architecture.md)
-- Companion project: `dark-helix/CLAUDE.md` — the factory that consumes
-  temper-git.
+- [RFC-0001: v1 architecture](../rfc/0001-architecture.md)
+- [RFC-0002: push and clone roadmap](../rfc/0002-push-and-clone.md)
 - Git wire protocol: https://git-scm.com/docs/http-protocol
 - GitHub REST v3 reference: https://docs.github.com/en/rest

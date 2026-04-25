@@ -1,39 +1,45 @@
-# RFC-0001: temper-git v1 architecture
+# RFC-0001: v1 architecture
 
 ## Status
 
-Draft — 2026-04-21. Implementation design for the scope decided in
+Draft. Implementation design for the scope decided in
 [ADR-0001](../adr/0001-temper-git-mission.md) /
-[ADR-0002](../adr/0002-temper-native-scm.md) /
-[ADR-0003](../adr/0003-byte-exact-git-compat.md). Seeking
-review before the first Rust line gets written.
+[ADR-0002](../adr/0002-temper-native-version-control.md) /
+[ADR-0003](../adr/0003-byte-exact-git-compat.md). Parts are built;
+parts are still sketched. Call-outs where the text is ahead of the
+code.
 
 ## Summary
 
-Concrete architecture for temper-git v1:
-- Which IOA entities exist and with what fields.
+Architecture for a v1 that runs locally end-to-end:
+- Which entities exist and with what fields.
 - Which WASM integrations serve which HTTP paths.
-- What Temper-kernel deltas we need (HttpEndpoint entity, streaming WASM I/O).
-- How storage is laid out: per-repo libSQL DB, WAL shipped to GCS, no
-  spill-tier complexity (see [ADR-0004](../adr/0004-per-repo-libsql-gcs.md)).
-- What auth looks like end-to-end.
-- How the product is deployed (K8s topology) for an air-gapped GCP sandbox.
-- Phase plan for delivery.
+- What kernel additions we needed (the `HttpEndpoint` entity and a
+  streaming WASM host API).
+- How auth looks end-to-end.
+- A phase plan for delivery.
+
+Storage, packaging, and operational concerns are deliberately out of
+scope for this RFC — the repository ships a local-only configuration
+using an embedded database; any production topology is a downstream
+choice we're not trying to pre-empt here.
 
 ## Scope of v1
 
-Per ADR-0001, v1 = Phase 1 = "Foundation." Concretely:
+v1 is the "Foundation" phase — enough for `git push` and `git clone`
+against a populated repository to round-trip faithfully, plus a small
+REST surface for the common agent-driven operations.
 
 **Ship (v1):**
 - Full git smart-HTTP wire protocol (upload-pack + receive-pack), pack-v2
   format, non-delta object emission.
-- GitHub REST v3 subset: `/api/v3/repos[/{owner}/{repo}[/{contents,pulls,refs,branches,tags,commits,merges}]]`.
+- GitHub REST v3 subset:
+  `/api/v3/repos[/{owner}/{repo}[/{contents,pulls,refs,branches,tags,commits,merges}]]`.
 - GitToken bearer auth with scope enforcement.
 - Repository, Ref, Commit, Tree, Blob, Tag, PullRequest, Review,
   ReviewComment, Webhook, GitToken as IOA entities.
 - Byte-exact object hashing + canonical serialization (the gating
   contract of [ADR-0003](../adr/0003-byte-exact-git-compat.md)).
-- Standalone K8s deployment in its own namespace (`temper-git`).
 - First-class `HttpEndpoint` IOA entity for path-prefix routing.
 - Streaming `http_call_streaming` WASM host API.
 
@@ -63,7 +69,7 @@ States: `Provisioning` → `Active` → `Archived`.
 Fields:
 - `Id: Edm.String` (UUIDv7, e.g. `repo-019dac...`)
 - `OwnerAccountId: Edm.String` (FK to an Account — may be on a different Temper tenant)
-- `Name: Edm.String` (e.g. `darkhelix-users`)
+- `Name: Edm.String` (e.g. `my-repo`)
 - `Description: Edm.String?`
 - `DefaultBranch: Edm.String` (e.g. `main`)
 - `Visibility: Edm.String` (one of `private`, `public`) — v1 always
@@ -176,10 +182,9 @@ Invariants:
 
 One git blob. States: `Durable`.
 
-Storage substrate: per-repo libSQL database, SQLite `BLOB` column. No
-spill tier; content lives inline on the row regardless of size. Durable
-backing is GCS via libsql-server's bottomless WAL shipping
-(see [ADR-0004](../adr/0004-per-repo-libsql-gcs.md)).
+Content lives inline on the row regardless of size; the physical
+storage backend (embedded SQLite, libSQL, Postgres — whatever the
+kernel is configured with) sits behind the event-store abstraction.
 
 Fields:
 - `Id: Edm.String` — SHA-1 hex.
@@ -197,10 +202,9 @@ Invariants:
 - `length(Content) == Size`.
 
 Operational notes:
-- A single BLOB is capped at SQLite's limit (~1 GiB default,
-  configurable to ~2.1 GiB). For code repos this is plenty.
-- >1 GB blobs (ML models, large binary archives) would need chunking;
-  out of scope for v1. Flagged in Open Questions.
+- For code repos, per-blob size is never the bottleneck. Very large
+  binary artifacts (ML models, media) would need chunking; out of
+  scope for v1. Flagged in Open Questions.
 
 ### `Tag`
 
@@ -384,24 +388,9 @@ endpoints are one-liners.
 
 ## Kernel deltas (temper/)
 
-v1 requires two Temper-kernel additions. We propose upstream first; if
-upstream accepts, we bump the submodule. If upstream rejects or
-delays, we carry the patches on our submodule branch with explicit
-rebase discipline. These are not optional — without them, the
-architecture doesn't work.
-
-**Status (2026-04-20):** both ADRs drafted and committed upstream on
-isolated branches, awaiting review before PR:
-
-- K-1: [`adr-0056-http-endpoint`](../../temper/docs/adrs/0056-http-endpoint.md)
-  on branch `adr-0056-http-endpoint` of the temper submodule.
-- K-2: [`adr-0057-http-call-streaming`](../../temper/docs/adrs/0057-http-call-streaming.md)
-  on branch `adr-0057-http-call-streaming` of the temper submodule.
-
-Both branches carry ADR text only (no implementation). Phase 1 of each
-ADR lands the spec + Cedar + CSDL; Phase 2 lands the runtime wiring.
-The submodule pointer in this repo will bump once at least K-1 Phase 1
-is merged upstream.
+v1 requires two kernel-level primitives. Both are generic enough to
+live in Temper itself rather than as temper-git patches. They are
+not optional — without them, the architecture doesn't work.
 
 ### K-1: `HttpEndpoint` IOA entity + router integration
 
@@ -410,8 +399,8 @@ Registered HttpEndpoints extend the router's match set: on request,
 longest-prefix match against registered HttpEndpoints, extract path
 params, dispatch to bound WASM integration.
 
-Why it belongs upstream: other Temper users will want the same pattern
-(generic reverse-proxy-into-entity-actions). Not temper-git-specific.
+Generic reverse-proxy-into-entity-actions pattern: any Temper
+consumer terminating a foreign wire protocol needs it.
 
 ### K-2: `http_call_streaming` in WASM host
 
@@ -443,52 +432,6 @@ Proposed as an opt-in feature gate in temper-wasm-sdk so existing modules
 don't break. Integration modules declare `streaming_io: true` in their
 manifest; Temper sets up the streaming plumbing on dispatch.
 
-## Storage sizing
-
-See [ADR-0004](../adr/0004-per-repo-libsql-gcs.md) for the substrate
-decision. Summary: per-repo libSQL database, SQLite BLOB inline for all
-blobs, WAL shipped to GCS as the durable backing.
-
-### Per-repo database footprint
-
-For the existing dark-helix repos (small, text-heavy):
-- `dark-helix.git` current: ~5 MB of source → ~5 MB SQLite DB.
-- `darkhelix-users.git` projected @ 6 months: ~500 MB of kafka-client
-  code + config → ~500 MB SQLite DB. All inline BLOBs.
-- `helix.git` mirror: ~200 MB → ~200 MB SQLite DB.
-
-Per-DB ceiling is ~1 TB before operational pain. Any single repo near
-that limit should be re-evaluated (likely misuse, e.g. vendoring
-third-party binaries that belong in a package registry).
-
-### Total GCS footprint
-
-GCS holds the WAL object stream for each libSQL database plus
-versioned snapshots. Overhead is ~2× the live DB size (WAL retention
-+ prior-version snapshots). Bucket budget for v1:
-
-- dark-helix factory initial: 4 repos × ~200 MB average × 2× overhead =
-  ~1.6 GB. Round up to a 10 GB bucket allocation.
-- Growth: object-store storage is effectively unbounded; lifecycle
-  rules trim old WAL snapshots (default: keep 30 days).
-
-### Trees and Commits
-
-- Tree entries: average 10–50 per tree; `CanonicalBytes` ~35 bytes per
-  entry + filename. A 20-entry tree is ~1–2 KiB.
-- Commits: `CanonicalBytes` ~200 bytes for small commits, up to ~5 KiB
-  for annotated ones.
-
-Both trivially inline in SQLite rows; no sizing concern.
-
-### Hot cache PVC
-
-The libsql-server pod keeps a local copy of each active DB in a PVC
-for read speed (embedded-replica-style). Cache size is tunable; v1
-default is 100 GiB PVC, which comfortably holds all four dark-helix
-repos with room for 5–10× growth. PVC autoscaling is on (GKE supports
-it).
-
 ## Auth flow
 
 1. Client presents bearer (`Authorization: Bearer ghp_...` or HTTP Basic
@@ -507,198 +450,70 @@ Unauthenticated requests are rejected for any mutation. Reads may be
 anonymous if Cedar's repo-level policy permits (v1: everything is
 authenticated).
 
-## Deployment topology
-
-Air-gapped GCP sandbox. Inbound from dark-helix and human clients only
-via in-cluster DNS. No public endpoint in v1.
-
-```
-Namespace: temper-git (separate from darkhelix)
-  ├─ StatefulSet: libsql-server       (1 replica; 1 per-repo DB)
-  │    ├─ Pod: libsql-server-0
-  │    │    ├─ image: libsql-server:<pinned>
-  │    │    ├─ volumeMount: /var/lib/libsql (PVC hot cache, 100 GiB)
-  │    │    ├─ env: LIBSQL_BOTTOMLESS_BUCKET=gs://temper-git-wal
-  │    │    ├─ env: LIBSQL_BOTTOMLESS_ENDPOINT=https://storage.googleapis.com
-  │    │    ├─ env: AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY (HMAC for GCS interop)
-  │    │    └─ serviceAccountName: libsql-server-ksa (Workload Identity → GCS)
-  │    └─ PVC: libsql-hot-cache (100 GiB, autoscales)
-  ├─ Deployment: temper-git            (1 replica)
-  │    ├─ image: temper-git:vX.Y.Z
-  │    ├─ env: TURSO_PLATFORM_URL=http://libsql-server.temper-git.svc.cluster.local:8080
-  │    ├─ env: TURSO_PLATFORM_AUTH_TOKEN (from Secret)
-  │    └─ command: temper serve --storage turso
-  ├─ Service: libsql-server            (ClusterIP :8080, internal only)
-  ├─ Service: temper-git               (ClusterIP :80, internal only)
-  ├─ ServiceAccount: libsql-server-ksa → GCP IAM on gs://temper-git-wal
-  └─ Secret: libsql-bottomless-creds (GCS HMAC key-pair)
-
-GCS bucket: gs://temper-git-wal
-  ├─ Object versioning: enabled, 30-day retention (lifecycle rule)
-  ├─ Access: Workload Identity only (libsql-server-ksa), no public reads
-  └─ Network: Private Google Access (no public IP egress required)
-```
-
-### Swap path to Turso Cloud
-
-The only coupling between the temper-git image and libsql-server is
-the libSQL wire protocol. To switch to Turso Cloud:
-
-1. Point `TURSO_PLATFORM_URL` + `TURSO_PLATFORM_AUTH_TOKEN` at Turso.
-2. Dump-restore each per-repo DB (libSQL's native dump works against
-   Turso Cloud endpoints).
-3. Roll temper-git pod. Decommission the self-hosted StatefulSet.
-
-No image rebuild, no schema change, no WASM rebuild. Zero code diff.
-
-### Image
-
-`us-central1-docker.pkg.dev/darkhelix-sandbox/temper-git/temper-git:vX.Y.Z`.
-Built from `temper-git/Dockerfile` which FROMs the Temper upstream image
-at the pinned submodule commit and COPYs `os-app/` + WASM modules on top.
-
-`us-central1-docker.pkg.dev/darkhelix-sandbox/temper-git/libsql-server:<pinned>`.
-Mirror of the upstream libsql-server image pinned to a specific version.
-Pulled to Artifact Registry so the cluster never reaches out for it.
-
-### Repo DNS cutover
-
-The existing `temper-git.darkhelix.svc.cluster.local` Service (backed by
-the old nginx+CGI pod) gets repointed to the new `temper-git` namespace
-in Phase 4, after the migration importer runs. Pre-migration,
-dark-helix agents use either endpoint; post-migration, only the new.
-
 ## Phase plan
 
-### Phase 1 — Foundation (~5 weeks, target v0.1.0)
+### Phase 1 — Foundation (target v0.1.0)
 
-Week 0: **Storage substrate verification (ADR-0004 gate)**
-- Deploy libsql-server StatefulSet + GCS bucket + Workload Identity in
-  the `temper-git` namespace of the sandbox cluster.
-- Verify: pod boot → create a DB → write rows → kill pod → new pod →
-  rows reappear via GCS WAL replay. Bit-exact.
-- Verify: Temper's `temper-store-turso::TursoEventStore` connects to
-  self-hosted libsql-server and round-trips entity writes.
-- Verify: 500 MiB BLOB insert + read-back hash check.
-- Verify: GCS egress via Private Google Access only (no public route).
-- Verify: per-DB provisioning via libsql admin API.
-- If any fail, ADR-0004 goes back to Proposed and we revisit.
+1. **Entity model + canonical serialization.**
+   - IOA specs + CSDL for all entities in §"Entity model".
+   - Cedar policies (read/write scoped by token scope).
+   - Rust helpers for canonical object serialization + SHA-1:
+     - `blob_canonical_bytes(content)`
+     - `tree_canonical_bytes(entries)`
+     - `commit_canonical_bytes(tree, parents, author, committer, msg, sig?)`
+     - `tag_canonical_bytes(...)`
+   - Hash-byte-match harness tests against real `git` output.
 
-Weeks 1–2: **Entity model + canonical serialization**
-- IOA specs + CSDL for all entities in §"Entity model".
-- Cedar policies (read/write scoped by token scope).
-- Rust helpers for canonical object serialization + SHA-1:
-  - `blob_canonical_bytes(content)`
-  - `tree_canonical_bytes(entries)`
-  - `commit_canonical_bytes(tree, parents, author, committer, msg, sig?)`
-  - `tag_canonical_bytes(...)`
-- Hash-byte-match harness tests (10+ fixtures per helper).
+2. **Protocol handlers.**
+   - `git_upload_pack` WASM: pkt-line + non-delta pack emission.
+   - `git_receive_pack` WASM: pack parsing + SHA-1 verification.
+   - `HttpEndpoint` routing (K-1).
+   - `http_call_streaming` (K-2).
+   - Round-trip integration test: clone → commit → push → clone → diff.
 
-Weeks 2–3: **Protocol handlers**
-- `git_upload_pack` WASM with pkt-line + non-delta pack emission.
-- `git_receive_pack` WASM with pack parsing + SHA-1 verification.
-- `HttpEndpoint` routing (K-1).
-- `http_call_streaming` (K-2).
-- Round-trip integration test: clone → commit → push → clone → diff.
+3. **REST subset + auth.**
+   - `github_rest_contents`, `_pulls`, `_refs`, `_branches`, `_commits`,
+     `_merges`, `_repos`.
+   - GitToken auth resolution.
+   - GitHub API shape tests against fixtures.
 
-Weeks 4–5: **REST subset + auth + repo provisioning**
-- `github_rest_contents`, `_pulls`, `_refs`, `_branches`, `_commits`,
-  `_merges`, `_repos`.
-- `repository_provision` WASM: on `Repository.Create`, spin a new
-  libSQL DB via admin API, update the Repository row with
-  `LibsqlDbName`.
-- GitToken auth resolution.
-- GitHub API shape tests against fixtures.
-- v0.1.0 release.
-
-### Phase 2 — Production hardening (~3 weeks, target v0.2.0)
+### Phase 2 — Hardening (target v0.2.0)
 
 - Pack delta compression (OFS_DELTA, thin packs).
 - Webhook delivery.
-- Remaining REST endpoints (releases, tags w/ signatures, compare, search-within-repo).
+- Remaining REST endpoints (releases, tags w/ signatures, compare,
+  search-within-repo).
 - Branch protection rules.
 - Concurrency / ref contention tests.
 
-### Phase 3 — Modern surface (~3 weeks, target v0.3.0)
+### Phase 3 — Modern surface (target v0.3.0)
 
 - GraphQL v4 implementation.
 - OAuth apps / fine-grained PATs.
-- Observe UI code-view widget (if we own it, or hand-off to dark-helix).
-
-### Phase 4 — Migration + decommission (~1 week, target v0.4.0)
-
-- Bare-repo importer: walks existing `darkhelix-users.git`,
-  `darkhelix-operators.git`, `dark-helix.git`, `helix.git` bare repos
-  from the old temper-git pod, ingests every object as Blob/Tree/Commit/Ref.
-- Repoint `temper-git.darkhelix.svc.cluster.local` at the new service.
-- Decommission the old pod.
-- v1.0.0.
 
 ## Open questions
 
 1. **SHA-256 git transition.** git-core is moving toward SHA-256 repos
-   as an option. Our v1 is SHA-1-only. Do we design entities with
-   `Id: Edm.String` assuming SHA-1 length (40 hex), or leave room
-   for 64-hex SHA-256 ids? Proposal: use `Edm.String` no length limit
-   now; when SHA-256 lands, add a `HashAlgo` field to Repository and
-   select serialization accordingly.
+   as an option. v1 is SHA-1-only. Proposal: use `Edm.String` with no
+   length limit; when SHA-256 lands, add a `HashAlgo` field to
+   Repository and select serialization accordingly.
 
-2. **Multi-GB blob chunking.** SQLite's BLOB max is ~1 GiB default (up
-   to ~2.1 GiB configured). Code repos never hit this. ML model
-   registries and media asset repos might. When a real user wants
-   >1 GB blobs, we add chunking (Content split across rows with a
-   ChunkIndex); out of scope for v1.
+2. **Multi-GB blob chunking.** Code repos never hit per-blob size
+   limits. ML model registries and media asset repos might. When a
+   real user wants >1 GB blobs, we add chunking (Content split across
+   rows with a ChunkIndex); out of scope for v1.
 
-3. **GraphQL in v1 vs v2.** REST alone covers 95% of agent use cases.
-   GraphQL is better for humans and modern CLIs. We defer to v2 unless
-   a specific consumer requires it.
+3. **GraphQL in v1 vs v2.** REST alone covers most agent use cases.
+   GraphQL is better for humans and modern CLIs. Deferred to v2.
 
 4. **Pack delta in v1 vs v2.** Non-delta packs work but are ~5×
-   larger. For the dark-helix factory's small-repo scale, that's fine;
-   for production use with large repos, we'd want deltas. v1 ships
-   non-delta; v2 adds deltas. Documented in release notes.
-
-5. **Migration timing.** Phase 4 is optional for the v1 ship if we
-   stand up new fresh repos and don't need to preserve history. For
-   dark-helix today, repos are near-empty, so migration is cheap —
-   recommend shipping migration with v1 anyway.
-
-6. **libsql-server HA for v1.** Single replica means pod-loss
-   downtime during WAL replay from GCS (seconds-to-minutes). For
-   sandbox this is acceptable. Production deployments need
-   leader+follower libSQL, planned for Phase 2. Flag this explicitly
-   in deployment docs so no one treats sandbox as HA.
-
-7. **GCS HMAC vs Workload-Identity-native.** libsql-server's S3 client
-   uses HMAC auth by convention. GCS supports HMAC via the
-   interoperability layer, but Workload Identity is the idiomatic GCP
-   pattern. If libsql-server adds native GCP auth, switch. Until then,
-   HMAC key stored in a Secret is the v1 path; rotation cadence
-   documented in deployment notes.
-
-## Sign-off required
-
-Review this RFC before Phase 1 starts. Areas most in need of scrutiny:
-
-- Entity model completeness: are there git concepts we haven't modeled?
-- Cedar policy surface: do the proposed scopes (`repo:read`,
-  `repo:write`, etc.) match what GitHub PATs use?
-- Kernel deltas: will upstream Temper accept HttpEndpoint + streaming
-  WASM I/O?
-- Deployment topology: own namespace + own libsql-server StatefulSet
-  + GCS bucket (per [ADR-0004](../adr/0004-per-repo-libsql-gcs.md)).
-  For sandbox this is a fair footprint; any concerns about the
-  libsql-server operational maturity we haven't covered?
-
-Once this RFC lands `Accepted`, Phase 1 work starts. New RFCs for Phase 2+
-as those come into focus.
+   larger on the wire. v1 ships non-delta; v2 adds deltas.
 
 ## References
 
 - [ADR-0001](../adr/0001-temper-git-mission.md)
-- [ADR-0002](../adr/0002-temper-native-scm.md)
+- [ADR-0002](../adr/0002-temper-native-version-control.md)
 - [ADR-0003](../adr/0003-byte-exact-git-compat.md)
-- [ADR-0004](../adr/0004-per-repo-libsql-gcs.md)
 - Git object format: https://git-scm.com/book/en/v2/Git-Internals-Git-Objects
 - Git pack format: https://git-scm.com/docs/pack-format
 - Git smart-HTTP: https://git-scm.com/docs/http-protocol

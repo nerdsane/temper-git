@@ -40,7 +40,7 @@
         <Property Name="Id"             Type="Edm.String" Nullable="false"/>
         <Property Name="RepositoryId"   Type="Edm.String" Nullable="false"/>
         <Property Name="Size"           Type="Edm.Int64"  Nullable="false"/>
-        <!-- SQLite BLOB column in the repo's libSQL DB (ADR-0004). -->
+        <!-- Raw blob bytes, stored inline on the entity row. -->
         <Property Name="Content"        Type="Edm.Binary" Nullable="false"/>
         <Property Name="CanonicalBytes" Type="Edm.Binary" Nullable="false"/>
         <Property Name="Status"         Type="Edm.String" Nullable="false"/>
