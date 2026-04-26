@@ -15,9 +15,9 @@
 //!   4. Compute each object's canonical SHA-1 via `tg_canonical`.
 //!   5. POST each object to `/tdata/{Blobs|Trees|Commits|Tags}` on
 //!      localhost:3000 as a JSON row with bytes base64-encoded.
-//!   6. For each ref command, POST to `/tdata/Refs` (Create),
-//!      `PATCH` to `/tdata/Refs(...)` with CAS (Update), or
-//!      `DELETE` (Delete).
+//!   6. For each ref command, POST to `/tdata/Refs` with returned-state CAS
+//!      validation (Create), or invoke `Temper.Update`/`Temper.Delete` with
+//!      PreviousCommitSha CAS (Update/Delete).
 //!   7. Emit sideband-64k-wrapped pkt-line report:
 //!        `unpack ok` (or `unpack <reason>` on failure)
 //!        `ok refs/heads/...` (or `ng <ref> <reason>`) per command
@@ -525,6 +525,7 @@ fn apply_ref_command(
             if !(200..400).contains(&resp.status) {
                 return Err(format!("ref create status {}", resp.status));
             }
+            validate_ref_create_response(&resp.body, repository_id, &cmd.refname, &cmd.new_sha)?;
             propagate_to_open_prs(ctx, principal, repository_id, &cmd.refname, &cmd.new_sha)?;
             Ok(())
         }
@@ -550,13 +551,66 @@ fn apply_ref_command(
         CommandKind::Delete => {
             let ref_id = ref_entity_id_for(existing_refs, repository_id, &cmd.refname);
             let url = format!("{TEMPER_API}/tdata/Refs('{ref_id}')/Temper.Delete");
-            let resp = post_json(ctx, principal, &url, "{}")?;
+            let body = json!({
+                "PreviousCommitSha": cmd.old_sha,
+            });
+            let resp = post_json(ctx, principal, &url, &body.to_string())?;
             if !(200..400).contains(&resp.status) {
                 return Err(format!("ref delete status {}", resp.status));
             }
             Ok(())
         }
     }
+}
+
+fn validate_ref_create_response(
+    body: &str,
+    repository_id: &str,
+    refname: &str,
+    target_sha: &str,
+) -> Result<(), String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("ref create response parse: {e}"))?;
+    let fields = parsed
+        .get("fields")
+        .ok_or_else(|| "ref create response has no fields".to_string())?;
+
+    let actual_repo = ref_response_field(fields, "RepositoryId")?;
+    if actual_repo != repository_id {
+        return Err(format!(
+            "ref create response repository mismatch: expected {repository_id}, got {actual_repo}"
+        ));
+    }
+
+    let actual_name = ref_response_field(fields, "Name")?;
+    if actual_name != refname {
+        return Err(format!(
+            "ref create response name mismatch: expected {refname}, got {actual_name}"
+        ));
+    }
+
+    let actual_status = ref_response_field(fields, "Status")?;
+    if actual_status != "Active" {
+        return Err(format!(
+            "ref create response status mismatch: expected Active, got {actual_status}"
+        ));
+    }
+
+    let actual_target = ref_response_field(fields, "TargetCommitSha")?;
+    if actual_target != target_sha {
+        return Err(format!(
+            "stale ref create compare-and-swap: current {actual_target}, requested {target_sha}"
+        ));
+    }
+
+    Ok(())
+}
+
+fn ref_response_field<'a>(fields: &'a serde_json::Value, name: &str) -> Result<&'a str, String> {
+    fields
+        .get(name)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| format!("ref create response missing {name}"))
 }
 
 fn effective_principal(ctx: &Context, headers: &[(String, String)]) -> Principal {

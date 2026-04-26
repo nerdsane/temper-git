@@ -50,7 +50,8 @@ name = "Delete"
 kind = "input"
 from = ["Active"]
 to = "Deleted"
-hint = "Delete the ref. Terminal state; kept for audit."
+params = ["PreviousCommitSha"]
+hint = "Compare-and-set delete. Requires PreviousCommitSha to match the current TargetCommitSha; terminal state kept for audit."
 
 # --- Output events ---
 
