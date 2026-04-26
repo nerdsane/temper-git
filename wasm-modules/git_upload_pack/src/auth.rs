@@ -40,7 +40,7 @@ pub struct Principal {
 impl Principal {
     pub fn anonymous() -> Self {
         Self {
-            kind: "Anonymous".to_string(),
+            kind: "anonymous".to_string(),
             id: "anonymous".to_string(),
             scopes: Vec::new(),
         }
@@ -48,14 +48,14 @@ impl Principal {
 
     pub fn system() -> Self {
         Self {
-            kind: "Admin".to_string(),
+            kind: "admin".to_string(),
             id: SYSTEM_PRINCIPAL.to_string(),
             scopes: Vec::new(),
         }
     }
 
     pub fn is_anonymous(&self) -> bool {
-        self.kind == "Anonymous"
+        self.kind == "anonymous"
     }
 
     /// Reserved for Cedar scope-gate enforcement once policy checks
@@ -68,12 +68,19 @@ impl Principal {
     /// Headers attached to outbound internal OData calls so they
     /// execute AS this principal.
     pub fn outbound_headers(&self) -> Vec<(String, String)> {
-        alloc::vec![
+        let mut headers = alloc::vec![
             ("X-Tenant-Id".to_string(), SYSTEM_TENANT.to_string()),
             ("X-Temper-Principal-Kind".to_string(), self.kind.clone()),
             ("X-Temper-Principal-Id".to_string(), self.id.clone()),
             ("Content-Type".to_string(), "application/json".to_string()),
-        ]
+        ];
+        if !self.scopes.is_empty() {
+            headers.push((
+                "X-Temper-Principal-Scopes".to_string(),
+                self.scopes.join(","),
+            ));
+        }
+        headers
     }
 }
 
@@ -116,7 +123,7 @@ pub fn resolve_principal(ctx: &Context, headers: &[(String, String)]) -> Princip
         .to_string();
     let scopes = parse_scopes(fields.get("Scopes"));
     Principal {
-        kind: "Customer".to_string(),
+        kind: "customer".to_string(),
         id,
         scopes,
     }

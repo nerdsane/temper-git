@@ -24,18 +24,14 @@
 //!
 //! Both share the same supported-types matrix:
 //!   * types 1..=4 (commit, tree, blob, tag) — full support
-//!   * types 6 (ofs-delta) and 7 (ref-delta) — rejected with a
-//!     descriptive error. Real delta support is a follow-up;
-//!     first-push workloads don't emit deltas, and we advertise
-//!     neither `thin-pack` nor `ofs-delta` on receive-pack so
-//!     clients won't send them.
+//!   * types 6 (ofs-delta) — expanded against earlier objects in the same pack
+//!   * types 7 (ref-delta) — expanded against earlier objects in the same
+//!     pack, or an external base supplied by callers parsing thin packs
 
 #![allow(clippy::result_large_err)]
 
+use std::collections::HashMap;
 use std::fmt;
-use std::io::Read;
-
-use flate2::read::ZlibDecoder;
 
 /// Git object kinds that `parse_pack` emits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,9 +76,12 @@ pub enum PackError {
     UnsupportedVersion(u32),
     /// Variable-length size field ran past the buffer.
     HeaderOverrun,
-    /// A delta object type (6 = ofs-delta, 7 = ref-delta). We
-    /// advertise neither in v0 so clients shouldn't send them.
+    /// A delta object type was found in a path that cannot resolve deltas.
     DeltaObjectsUnsupported(u8),
+    /// A delta referenced a base object this pack parser has not seen.
+    DeltaBaseMissing(String),
+    /// The binary delta program was malformed or did not produce the declared size.
+    DeltaApplyFailed(String),
     /// Unknown type tag (0, 5, or >7).
     InvalidObjectType(u8),
     /// zlib-deflated payload failed to decompress.
@@ -102,11 +101,18 @@ impl fmt::Display for PackError {
                 write!(f, "pack truncated: got {got} bytes, need {need}")
             }
             PackError::BadMagic(m) => write!(f, "pack bad magic: {:02x?}", m),
-            PackError::UnsupportedVersion(v) => write!(f, "pack version {v} not supported (need 2)"),
+            PackError::UnsupportedVersion(v) => {
+                write!(f, "pack version {v} not supported (need 2)")
+            }
             PackError::HeaderOverrun => write!(f, "object header ran past buffer"),
             PackError::DeltaObjectsUnsupported(t) => {
-                write!(f, "pack contains delta object type {t} (ofs/ref); v0 parser does not support deltas")
+                write!(
+                    f,
+                    "pack contains unresolved delta object type {t} (ofs/ref)"
+                )
             }
+            PackError::DeltaBaseMissing(base) => write!(f, "pack delta base not found: {base}"),
+            PackError::DeltaApplyFailed(e) => write!(f, "pack delta apply failed: {e}"),
             PackError::InvalidObjectType(t) => write!(f, "invalid pack object type: {t}"),
             PackError::ZlibDecompressFailed(e) => write!(f, "zlib decompress failed: {e}"),
             PackError::SizeMismatch { declared, actual } => {
@@ -128,71 +134,17 @@ pub fn parse_pack(bytes: &[u8]) -> Result<Vec<PackObject>, PackError> {
             need: 32,
         });
     }
-
-    // Header.
-    if &bytes[..4] != b"PACK" {
-        let mut magic = [0u8; 4];
-        magic.copy_from_slice(&bytes[..4]);
-        return Err(PackError::BadMagic(magic));
+    let cursor = std::io::Cursor::new(bytes);
+    let mut parser = StreamingPackParser::begin(cursor)?;
+    let declared_count = parser.object_count() as usize;
+    let mut out = Vec::with_capacity(declared_count);
+    while let Some(obj) = parser.next_object()? {
+        out.push(obj);
     }
-    let version = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
-    if version != 2 {
-        return Err(PackError::UnsupportedVersion(version));
-    }
-    let declared_count = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
-
-    // Trailer verification.
-    let trailer_start = bytes.len() - 20;
-    let trailer = &bytes[trailer_start..];
-    let expected = {
-        use sha1::Digest;
-        let mut h = sha1::Sha1::new();
-        h.update(&bytes[..trailer_start]);
-        h.finalize().to_vec()
-    };
-    if trailer != expected.as_slice() {
+    let cursor = parser.finish_inner()?;
+    if cursor.position() != bytes.len() as u64 {
         return Err(PackError::TrailerMismatch);
     }
-
-    // Object stream.
-    let mut cursor = 12usize;
-    let mut out = Vec::with_capacity(declared_count);
-    while cursor < trailer_start {
-        let (kind, declared_size, header_len) =
-            decode_object_header(&bytes[cursor..trailer_start])?;
-        cursor += header_len;
-
-        // Inflate one object's zlib-deflated payload. flate2 reads
-        // until the DEFLATE END block — we count how many input
-        // bytes were consumed via `total_in` on the decoder.
-        let mut decoder = ZlibDecoder::new(&bytes[cursor..trailer_start]);
-        let mut payload = Vec::with_capacity(declared_size);
-        decoder
-            .read_to_end(&mut payload)
-            .map_err(|e| PackError::ZlibDecompressFailed(e.to_string()))?;
-        let consumed = decoder.total_in() as usize;
-        cursor += consumed;
-
-        if payload.len() != declared_size {
-            return Err(PackError::SizeMismatch {
-                declared: declared_size,
-                actual: payload.len(),
-            });
-        }
-
-        out.push(PackObject {
-            kind,
-            data: payload,
-        });
-    }
-
-    if out.len() != declared_count {
-        return Err(PackError::SizeMismatch {
-            declared: declared_count,
-            actual: out.len(),
-        });
-    }
-
     Ok(out)
 }
 
@@ -221,8 +173,8 @@ pub fn parse_pack(bytes: &[u8]) -> Result<Vec<PackObject>, PackError> {
 /// line with our v0 parser. Callers that need delta emission
 /// should convert to plain objects first.
 pub fn emit_pack(objects: &[PackObject]) -> Vec<u8> {
-    let mut emitter = PackEmitter::begin(Vec::new(), objects.len() as u32)
-        .expect("Vec write never fails");
+    let mut emitter =
+        PackEmitter::begin(Vec::new(), objects.len() as u32).expect("Vec write never fails");
     for obj in objects {
         emitter
             .write_object(obj.kind, &obj.data)
@@ -261,11 +213,7 @@ impl<W: std::io::Write> PackEmitter<W> {
     /// Emit one object. Writes the variable-length type+size header
     /// and the zlib-deflated body. The body is consumed in one call;
     /// for very large blobs use `write_object_stream`.
-    pub fn write_object(
-        &mut self,
-        kind: ObjectKind,
-        body: &[u8],
-    ) -> std::io::Result<()> {
+    pub fn write_object(&mut self, kind: ObjectKind, body: &[u8]) -> std::io::Result<()> {
         self.write_header(kind, body.len())?;
         self.write_deflated(body)
     }
@@ -281,7 +229,9 @@ impl<W: std::io::Write> PackEmitter<W> {
         self.write_header(kind, size)?;
         // Pipe `body` through the deflater, which writes through us.
         let mut enc = flate2::write::ZlibEncoder::new(
-            HasherSink { inner: &mut self.inner },
+            HasherSink {
+                inner: &mut self.inner,
+            },
             flate2::Compression::default(),
         );
         std::io::copy(&mut body, &mut enc)?;
@@ -300,11 +250,7 @@ impl<W: std::io::Write> PackEmitter<W> {
         Ok(inner)
     }
 
-    fn write_header(
-        &mut self,
-        kind: ObjectKind,
-        size: usize,
-    ) -> std::io::Result<()> {
+    fn write_header(&mut self, kind: ObjectKind, size: usize) -> std::io::Result<()> {
         use std::io::Write;
         let type_bits = match kind {
             ObjectKind::Commit => 1u8,
@@ -338,7 +284,9 @@ impl<W: std::io::Write> PackEmitter<W> {
     fn write_deflated(&mut self, body: &[u8]) -> std::io::Result<()> {
         use std::io::Write;
         let mut enc = flate2::write::ZlibEncoder::new(
-            HasherSink { inner: &mut self.inner },
+            HasherSink {
+                inner: &mut self.inner,
+            },
             flate2::Compression::default(),
         );
         enc.write_all(body)?;
@@ -394,51 +342,6 @@ impl<W: std::io::Write> std::io::Write for HasherSink<'_, W> {
     }
 }
 
-fn decode_object_header(buf: &[u8]) -> Result<(ObjectKind, usize, usize), PackError> {
-    if buf.is_empty() {
-        return Err(PackError::HeaderOverrun);
-    }
-    let b0 = buf[0];
-    let type_bits = (b0 >> 4) & 0b0000_0111;
-    let mut size: usize = (b0 & 0b0000_1111) as usize;
-    let mut shift: u32 = 4;
-    let mut used = 1usize;
-    let mut b = b0;
-
-    while b & 0x80 != 0 {
-        if used >= buf.len() {
-            return Err(PackError::HeaderOverrun);
-        }
-        b = buf[used];
-        used += 1;
-        // Guard against size overflow. git caps single-object
-        // size at ~2 GiB; we're more conservative at u32 so
-        // anything wild fails fast.
-        let add = (b & 0x7f) as usize;
-        let shifted = add
-            .checked_shl(shift)
-            .ok_or(PackError::HeaderOverrun)?;
-        size = size
-            .checked_add(shifted)
-            .ok_or(PackError::HeaderOverrun)?;
-        shift += 7;
-        if shift > 63 {
-            return Err(PackError::HeaderOverrun);
-        }
-    }
-
-    let kind = match type_bits {
-        1 => ObjectKind::Commit,
-        2 => ObjectKind::Tree,
-        3 => ObjectKind::Blob,
-        4 => ObjectKind::Tag,
-        6 | 7 => return Err(PackError::DeltaObjectsUnsupported(type_bits)),
-        other => return Err(PackError::InvalidObjectType(other)),
-    };
-
-    Ok((kind, size, used))
-}
-
 // ---------------------------------------------------------------------
 // Streaming parser
 // ---------------------------------------------------------------------
@@ -460,6 +363,22 @@ pub struct StreamingPackParser<R: std::io::BufRead> {
     hasher: sha1::Sha1,
     object_count: u32,
     consumed: u32,
+    pack_offset: u64,
+    objects_by_sha: HashMap<String, ResolvedObject>,
+    objects_by_offset: HashMap<u64, String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedObject {
+    kind: ObjectKind,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    Base(ObjectKind),
+    OfsDelta,
+    RefDelta,
 }
 
 impl<R: std::io::BufRead> StreamingPackParser<R> {
@@ -468,8 +387,9 @@ impl<R: std::io::BufRead> StreamingPackParser<R> {
     pub fn begin(mut inner: R) -> Result<Self, PackError> {
         use sha1::Digest;
         let mut hasher = sha1::Sha1::new();
+        let mut pack_offset = 0u64;
         let mut header = [0u8; 12];
-        read_exact_hashed(&mut inner, &mut hasher, &mut header)?;
+        read_exact_hashed(&mut inner, &mut hasher, &mut pack_offset, &mut header)?;
         if &header[..4] != b"PACK" {
             let mut magic = [0u8; 4];
             magic.copy_from_slice(&header[..4]);
@@ -479,13 +399,15 @@ impl<R: std::io::BufRead> StreamingPackParser<R> {
         if version != 2 {
             return Err(PackError::UnsupportedVersion(version));
         }
-        let object_count =
-            u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
+        let object_count = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
         Ok(Self {
             inner,
             hasher,
             object_count,
             consumed: 0,
+            pack_offset,
+            objects_by_sha: HashMap::new(),
+            objects_by_offset: HashMap::new(),
         })
     }
 
@@ -498,19 +420,113 @@ impl<R: std::io::BufRead> StreamingPackParser<R> {
     /// declared object has been yielded; the caller should then
     /// invoke `finish` to validate the trailer.
     pub fn next_object(&mut self) -> Result<Option<PackObject>, PackError> {
+        self.next_object_with_ref_delta_base(|_| Ok(None))
+    }
+
+    /// Pull the next decoded object, resolving ref-delta bases that
+    /// are not present earlier in the pack via `resolve_external_base`.
+    /// This is required for Git thin packs, where clients can delta
+    /// against objects the server already advertised.
+    pub fn next_object_with_ref_delta_base<F>(
+        &mut self,
+        mut resolve_external_base: F,
+    ) -> Result<Option<PackObject>, PackError>
+    where
+        F: FnMut(&str) -> Result<Option<PackObject>, PackError>,
+    {
         if self.consumed >= self.object_count {
             return Ok(None);
         }
-        let (kind, declared_size) = read_object_header_hashed(&mut self.inner, &mut self.hasher)?;
-        let data = inflate_one_object_hashed(&mut self.inner, &mut self.hasher, declared_size)?;
+        let object_offset = self.pack_offset;
+        let (entry_kind, declared_size) =
+            read_entry_header_hashed(&mut self.inner, &mut self.hasher, &mut self.pack_offset)?;
+        let resolved = match entry_kind {
+            EntryKind::Base(kind) => ResolvedObject {
+                kind,
+                data: inflate_one_object_hashed(
+                    &mut self.inner,
+                    &mut self.hasher,
+                    &mut self.pack_offset,
+                    declared_size,
+                )?,
+            },
+            EntryKind::RefDelta => {
+                let mut raw_sha = [0u8; 20];
+                read_exact_hashed(
+                    &mut self.inner,
+                    &mut self.hasher,
+                    &mut self.pack_offset,
+                    &mut raw_sha,
+                )?;
+                let base_sha = hex_lower(&raw_sha);
+                let base = if let Some(base) = self.objects_by_sha.get(&base_sha).cloned() {
+                    base
+                } else if let Some(base) = resolve_external_base(&base_sha)? {
+                    ResolvedObject {
+                        kind: base.kind,
+                        data: base.data,
+                    }
+                } else {
+                    return Err(PackError::DeltaBaseMissing(base_sha.clone()));
+                };
+                let delta = inflate_one_object_hashed(
+                    &mut self.inner,
+                    &mut self.hasher,
+                    &mut self.pack_offset,
+                    declared_size,
+                )?;
+                ResolvedObject {
+                    kind: base.kind,
+                    data: apply_delta(&base.data, &delta)?,
+                }
+            }
+            EntryKind::OfsDelta => {
+                let base_offset = read_ofs_delta_base_offset(
+                    &mut self.inner,
+                    &mut self.hasher,
+                    &mut self.pack_offset,
+                    object_offset,
+                )?;
+                let base_sha = self
+                    .objects_by_offset
+                    .get(&base_offset)
+                    .cloned()
+                    .ok_or_else(|| PackError::DeltaBaseMissing(format!("offset {base_offset}")))?;
+                let base = self
+                    .objects_by_sha
+                    .get(&base_sha)
+                    .cloned()
+                    .ok_or_else(|| PackError::DeltaBaseMissing(base_sha.clone()))?;
+                let delta = inflate_one_object_hashed(
+                    &mut self.inner,
+                    &mut self.hasher,
+                    &mut self.pack_offset,
+                    declared_size,
+                )?;
+                ResolvedObject {
+                    kind: base.kind,
+                    data: apply_delta(&base.data, &delta)?,
+                }
+            }
+        };
+        let sha = object_sha(resolved.kind, &resolved.data);
+        self.objects_by_offset.insert(object_offset, sha.clone());
+        self.objects_by_sha.insert(sha, resolved.clone());
         self.consumed += 1;
-        Ok(Some(PackObject { kind, data }))
+        Ok(Some(PackObject {
+            kind: resolved.kind,
+            data: resolved.data,
+        }))
     }
 
     /// Read and verify the 20-byte SHA-1 trailer, then drop the
     /// reader. Errors if the trailer doesn't match the running hash
     /// or the declared object count was wrong.
-    pub fn finish(mut self) -> Result<(), PackError> {
+    pub fn finish(self) -> Result<(), PackError> {
+        self.finish_inner().map(|_| ())
+    }
+
+    fn finish_inner(mut self) -> Result<R, PackError> {
         if self.consumed != self.object_count {
             return Err(PackError::SizeMismatch {
                 declared: self.object_count as usize,
@@ -527,7 +543,7 @@ impl<R: std::io::BufRead> StreamingPackParser<R> {
         if computed.as_slice() != trailer {
             return Err(PackError::TrailerMismatch);
         }
-        Ok(())
+        Ok(self.inner)
     }
 }
 
@@ -536,6 +552,7 @@ impl<R: std::io::BufRead> StreamingPackParser<R> {
 fn read_exact_hashed<R: std::io::Read>(
     r: &mut R,
     hasher: &mut sha1::Sha1,
+    pack_offset: &mut u64,
     buf: &mut [u8],
 ) -> Result<(), PackError> {
     use sha1::Digest;
@@ -551,6 +568,7 @@ fn read_exact_hashed<R: std::io::Read>(
             });
         }
         hasher.update(&buf[filled..filled + n]);
+        *pack_offset += n as u64;
         filled += n;
     }
     Ok(())
@@ -558,15 +576,17 @@ fn read_exact_hashed<R: std::io::Read>(
 
 /// Read the variable-length type+size header for one object,
 /// hashing every byte that goes past.
-fn read_object_header_hashed<R: std::io::Read>(
+fn read_entry_header_hashed<R: std::io::Read>(
     r: &mut R,
     hasher: &mut sha1::Sha1,
-) -> Result<(ObjectKind, usize), PackError> {
+    pack_offset: &mut u64,
+) -> Result<(EntryKind, usize), PackError> {
     use sha1::Digest;
     let mut byte = [0u8; 1];
     r.read_exact(&mut byte)
         .map_err(|_| PackError::HeaderOverrun)?;
     hasher.update(&byte);
+    *pack_offset += 1;
     let b0 = byte[0];
     let type_bits = (b0 >> 4) & 0b0000_0111;
     let mut size: usize = (b0 & 0b0000_1111) as usize;
@@ -577,6 +597,7 @@ fn read_object_header_hashed<R: std::io::Read>(
         r.read_exact(&mut byte)
             .map_err(|_| PackError::HeaderOverrun)?;
         hasher.update(&byte);
+        *pack_offset += 1;
         last = byte[0];
         let add = (last & 0x7f) as usize;
         let shifted = add.checked_shl(shift).ok_or(PackError::HeaderOverrun)?;
@@ -588,14 +609,43 @@ fn read_object_header_hashed<R: std::io::Read>(
     }
 
     let kind = match type_bits {
-        1 => ObjectKind::Commit,
-        2 => ObjectKind::Tree,
-        3 => ObjectKind::Blob,
-        4 => ObjectKind::Tag,
-        6 | 7 => return Err(PackError::DeltaObjectsUnsupported(type_bits)),
+        1 => EntryKind::Base(ObjectKind::Commit),
+        2 => EntryKind::Base(ObjectKind::Tree),
+        3 => EntryKind::Base(ObjectKind::Blob),
+        4 => EntryKind::Base(ObjectKind::Tag),
+        6 => EntryKind::OfsDelta,
+        7 => EntryKind::RefDelta,
         other => return Err(PackError::InvalidObjectType(other)),
     };
     Ok((kind, size))
+}
+
+fn read_ofs_delta_base_offset<R: std::io::Read>(
+    r: &mut R,
+    hasher: &mut sha1::Sha1,
+    pack_offset: &mut u64,
+    object_offset: u64,
+) -> Result<u64, PackError> {
+    use sha1::Digest;
+    let mut byte = [0u8; 1];
+    r.read_exact(&mut byte)
+        .map_err(|_| PackError::HeaderOverrun)?;
+    hasher.update(&byte);
+    *pack_offset += 1;
+
+    let mut c = byte[0];
+    let mut distance = (c & 0x7f) as u64;
+    while c & 0x80 != 0 {
+        r.read_exact(&mut byte)
+            .map_err(|_| PackError::HeaderOverrun)?;
+        hasher.update(&byte);
+        *pack_offset += 1;
+        c = byte[0];
+        distance = ((distance + 1) << 7) | ((c & 0x7f) as u64);
+    }
+    object_offset
+        .checked_sub(distance)
+        .ok_or_else(|| PackError::DeltaBaseMissing(format!("offset before pack: -{distance}")))
 }
 
 /// Decode exactly one zlib stream from `inner`, hashing the raw
@@ -607,6 +657,7 @@ fn read_object_header_hashed<R: std::io::Read>(
 fn inflate_one_object_hashed<R: std::io::BufRead>(
     inner: &mut R,
     hasher: &mut sha1::Sha1,
+    pack_offset: &mut u64,
     expected_size: usize,
 ) -> Result<Vec<u8>, PackError> {
     use flate2::{Decompress, FlushDecompress, Status};
@@ -614,8 +665,7 @@ fn inflate_one_object_hashed<R: std::io::BufRead>(
 
     let mut decoder = Decompress::new(true);
     let mut output: Vec<u8> = Vec::with_capacity(expected_size.min(1 << 20));
-    output.resize(expected_size, 0);
-    let mut out_pos = 0;
+    let mut out_buf = [0u8; 64 * 1024];
 
     loop {
         let in_buf = inner
@@ -627,22 +677,24 @@ fn inflate_one_object_hashed<R: std::io::BufRead>(
             ));
         }
         let in_before = decoder.total_in();
+        let out_before = decoder.total_out();
         let status = decoder
-            .decompress(in_buf, &mut output[out_pos..], FlushDecompress::None)
+            .decompress(in_buf, &mut out_buf, FlushDecompress::None)
             .map_err(|e| PackError::ZlibDecompressFailed(e.to_string()))?;
         let consumed_in = (decoder.total_in() - in_before) as usize;
-        let produced = (decoder.total_out() as usize).saturating_sub(out_pos);
+        let produced = (decoder.total_out() - out_before) as usize;
         hasher.update(&in_buf[..consumed_in]);
         inner.consume(consumed_in);
-        out_pos += produced;
+        *pack_offset += consumed_in as u64;
+        output.extend_from_slice(&out_buf[..produced]);
 
         match status {
             Status::StreamEnd => break,
             Status::Ok | Status::BufError => {
-                if out_pos > expected_size {
+                if output.len() > expected_size {
                     return Err(PackError::SizeMismatch {
                         declared: expected_size,
-                        actual: out_pos,
+                        actual: output.len(),
                     });
                 }
                 if consumed_in == 0 && produced == 0 {
@@ -656,13 +708,140 @@ fn inflate_one_object_hashed<R: std::io::BufRead>(
         }
     }
 
-    if out_pos != expected_size {
+    if output.len() != expected_size {
         return Err(PackError::SizeMismatch {
             declared: expected_size,
-            actual: out_pos,
+            actual: output.len(),
         });
     }
     Ok(output)
+}
+
+fn object_sha(kind: ObjectKind, body: &[u8]) -> String {
+    use sha1::Digest;
+    let mut hasher = sha1::Sha1::new();
+    hasher.update(format!("{} {}\0", kind.header_prefix(), body.len()).as_bytes());
+    hasher.update(body);
+    hex_lower(&hasher.finalize())
+}
+
+fn read_delta_varint(delta: &[u8], cursor: &mut usize) -> Result<usize, PackError> {
+    let mut out = 0usize;
+    let mut shift = 0usize;
+    loop {
+        let byte = *delta
+            .get(*cursor)
+            .ok_or_else(|| PackError::DeltaApplyFailed("truncated delta varint".to_string()))?;
+        *cursor += 1;
+        out |= ((byte & 0x7f) as usize)
+            .checked_shl(shift as u32)
+            .ok_or_else(|| PackError::DeltaApplyFailed("delta varint overflow".to_string()))?;
+        if byte & 0x80 == 0 {
+            return Ok(out);
+        }
+        shift += 7;
+        if shift > usize::BITS as usize {
+            return Err(PackError::DeltaApplyFailed(
+                "delta varint too large".to_string(),
+            ));
+        }
+    }
+}
+
+fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, PackError> {
+    let mut cursor = 0usize;
+    let source_size = read_delta_varint(delta, &mut cursor)?;
+    if source_size != base.len() {
+        return Err(PackError::DeltaApplyFailed(format!(
+            "source size mismatch: declared {source_size}, base {}",
+            base.len()
+        )));
+    }
+    let target_size = read_delta_varint(delta, &mut cursor)?;
+    let mut out = Vec::with_capacity(target_size);
+
+    while cursor < delta.len() {
+        let op = delta[cursor];
+        cursor += 1;
+        if op & 0x80 != 0 {
+            let mut copy_offset = 0usize;
+            let mut copy_size = 0usize;
+            if op & 0x01 != 0 {
+                copy_offset |= read_delta_byte(delta, &mut cursor)? as usize;
+            }
+            if op & 0x02 != 0 {
+                copy_offset |= (read_delta_byte(delta, &mut cursor)? as usize) << 8;
+            }
+            if op & 0x04 != 0 {
+                copy_offset |= (read_delta_byte(delta, &mut cursor)? as usize) << 16;
+            }
+            if op & 0x08 != 0 {
+                copy_offset |= (read_delta_byte(delta, &mut cursor)? as usize) << 24;
+            }
+            if op & 0x10 != 0 {
+                copy_size |= read_delta_byte(delta, &mut cursor)? as usize;
+            }
+            if op & 0x20 != 0 {
+                copy_size |= (read_delta_byte(delta, &mut cursor)? as usize) << 8;
+            }
+            if op & 0x40 != 0 {
+                copy_size |= (read_delta_byte(delta, &mut cursor)? as usize) << 16;
+            }
+            if copy_size == 0 {
+                copy_size = 0x10000;
+            }
+            let end = copy_offset
+                .checked_add(copy_size)
+                .ok_or_else(|| PackError::DeltaApplyFailed("copy range overflow".to_string()))?;
+            let slice = base.get(copy_offset..end).ok_or_else(|| {
+                PackError::DeltaApplyFailed(format!(
+                    "copy range {copy_offset}..{end} outside base {}",
+                    base.len()
+                ))
+            })?;
+            out.extend_from_slice(slice);
+        } else if op != 0 {
+            let len = op as usize;
+            let end = cursor
+                .checked_add(len)
+                .ok_or_else(|| PackError::DeltaApplyFailed("insert range overflow".to_string()))?;
+            let literal = delta.get(cursor..end).ok_or_else(|| {
+                PackError::DeltaApplyFailed("literal insert exceeds delta".to_string())
+            })?;
+            out.extend_from_slice(literal);
+            cursor = end;
+        } else {
+            return Err(PackError::DeltaApplyFailed(
+                "reserved zero opcode".to_string(),
+            ));
+        }
+    }
+
+    if out.len() != target_size {
+        return Err(PackError::DeltaApplyFailed(format!(
+            "target size mismatch: declared {target_size}, got {}",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
+fn read_delta_byte(delta: &[u8], cursor: &mut usize) -> Result<u8, PackError> {
+    let byte = *delta
+        .get(*cursor)
+        .ok_or_else(|| PackError::DeltaApplyFailed("truncated copy instruction".to_string()))?;
+    *cursor += 1;
+    Ok(byte)
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
 }
 
 #[cfg(test)]
@@ -708,6 +887,108 @@ mod tests {
             body.extend_from_slice(&build_header(*kind, data.len()));
             body.extend_from_slice(&zlib_compress(data));
         }
+        let mut h = sha1::Sha1::new();
+        h.update(&body);
+        body.extend_from_slice(&h.finalize());
+        body
+    }
+
+    fn encode_varint(mut n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (n & 0x7f) as u8;
+            n >>= 7;
+            if n != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if n == 0 {
+                return out;
+            }
+        }
+    }
+
+    fn literal_delta(base: &[u8], target: &[u8]) -> Vec<u8> {
+        assert!(target.len() < 0x80);
+        let mut delta = Vec::new();
+        delta.extend_from_slice(&encode_varint(base.len()));
+        delta.extend_from_slice(&encode_varint(target.len()));
+        delta.push(target.len() as u8);
+        delta.extend_from_slice(target);
+        delta
+    }
+
+    fn raw_sha(hex_sha: &str) -> [u8; 20] {
+        let mut raw_base_sha = [0u8; 20];
+        for (idx, chunk) in hex_sha.as_bytes().chunks(2).enumerate() {
+            let hex = std::str::from_utf8(chunk).unwrap();
+            raw_base_sha[idx] = u8::from_str_radix(hex, 16).unwrap();
+        }
+        raw_base_sha
+    }
+
+    fn build_ref_delta_pack(base: &[u8], target: &[u8]) -> Vec<u8> {
+        let base_sha = object_sha(ObjectKind::Blob, base);
+        let raw_base_sha = raw_sha(&base_sha);
+        let delta = literal_delta(base, target);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(b"PACK");
+        body.extend_from_slice(&2u32.to_be_bytes());
+        body.extend_from_slice(&2u32.to_be_bytes());
+        body.extend_from_slice(&build_header(3, base.len()));
+        body.extend_from_slice(&zlib_compress(base));
+        body.extend_from_slice(&build_header(7, delta.len()));
+        body.extend_from_slice(&raw_base_sha);
+        body.extend_from_slice(&zlib_compress(&delta));
+        let mut h = sha1::Sha1::new();
+        h.update(&body);
+        body.extend_from_slice(&h.finalize());
+        body
+    }
+
+    fn build_thin_ref_delta_pack(base_sha: &str, base: &[u8], target: &[u8]) -> Vec<u8> {
+        let delta = literal_delta(base, target);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(b"PACK");
+        body.extend_from_slice(&2u32.to_be_bytes());
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&build_header(7, delta.len()));
+        body.extend_from_slice(&raw_sha(base_sha));
+        body.extend_from_slice(&zlib_compress(&delta));
+        let mut h = sha1::Sha1::new();
+        h.update(&body);
+        body.extend_from_slice(&h.finalize());
+        body
+    }
+
+    fn encode_ofs_delta_distance(mut distance: usize) -> Vec<u8> {
+        let mut out = vec![(distance & 0x7f) as u8];
+        distance >>= 7;
+        while distance != 0 {
+            distance -= 1;
+            out.push(((distance & 0x7f) as u8) | 0x80);
+            distance >>= 7;
+        }
+        out.reverse();
+        out
+    }
+
+    fn build_ofs_delta_pack(base: &[u8], target: &[u8]) -> Vec<u8> {
+        let delta = literal_delta(base, target);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(b"PACK");
+        body.extend_from_slice(&2u32.to_be_bytes());
+        body.extend_from_slice(&2u32.to_be_bytes());
+        let base_offset = body.len();
+        body.extend_from_slice(&build_header(3, base.len()));
+        body.extend_from_slice(&zlib_compress(base));
+        let delta_offset = body.len();
+        body.extend_from_slice(&build_header(6, delta.len()));
+        body.extend_from_slice(&encode_ofs_delta_distance(delta_offset - base_offset));
+        body.extend_from_slice(&zlib_compress(&delta));
         let mut h = sha1::Sha1::new();
         h.update(&body);
         body.extend_from_slice(&h.finalize());
@@ -787,20 +1068,56 @@ mod tests {
     }
 
     #[test]
-    fn delta_object_type_rejected() {
-        // Craft an ofs-delta (type 6). Just the header byte — the
-        // parser should fail before touching the payload.
-        let mut pack = Vec::new();
-        pack.extend_from_slice(b"PACK");
-        pack.extend_from_slice(&2u32.to_be_bytes());
-        pack.extend_from_slice(&1u32.to_be_bytes());
-        pack.push((6 << 4) | 5); // type=6, size=5
-        pack.extend_from_slice(&[0u8; 10]); // bogus payload
-        let mut h = sha1::Sha1::new();
-        h.update(&pack);
-        pack.extend_from_slice(&h.finalize());
-        let err = parse_pack(&pack).unwrap_err();
-        assert!(matches!(err, PackError::DeltaObjectsUnsupported(6)));
+    fn ref_delta_expands_against_prior_pack_object() {
+        let base = b"hello world\n";
+        let target = b"hello temper\n";
+        let pack = build_ref_delta_pack(base, target);
+
+        let objects = parse_pack(&pack).unwrap();
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].kind, ObjectKind::Blob);
+        assert_eq!(objects[0].data, base);
+        assert_eq!(objects[1].kind, ObjectKind::Blob);
+        assert_eq!(objects[1].data, target);
+    }
+
+    #[test]
+    fn ref_delta_expands_against_external_thin_pack_base() {
+        let base = b"remote base tree bytes";
+        let target = b"remote target tree bytes";
+        let base_sha = object_sha(ObjectKind::Tree, base);
+        let pack = build_thin_ref_delta_pack(&base_sha, base, target);
+        let mut parser = StreamingPackParser::begin(std::io::Cursor::new(pack)).unwrap();
+
+        let object = parser
+            .next_object_with_ref_delta_base(|sha| {
+                assert_eq!(sha, base_sha);
+                Ok(Some(PackObject {
+                    kind: ObjectKind::Tree,
+                    data: base.to_vec(),
+                }))
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(object.kind, ObjectKind::Tree);
+        assert_eq!(object.data, target);
+        assert!(parser.next_object().unwrap().is_none());
+        parser.finish().unwrap();
+    }
+
+    #[test]
+    fn ofs_delta_expands_against_prior_pack_object() {
+        let base = b"hello world\n";
+        let target = b"hello temper\n";
+        let pack = build_ofs_delta_pack(base, target);
+
+        let objects = parse_pack(&pack).unwrap();
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].kind, ObjectKind::Blob);
+        assert_eq!(objects[0].data, base);
+        assert_eq!(objects[1].kind, ObjectKind::Blob);
+        assert_eq!(objects[1].data, target);
     }
 
     #[test]

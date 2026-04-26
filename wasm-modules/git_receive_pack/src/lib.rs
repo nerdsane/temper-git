@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use temper_wasm_sdk::http_stream::InboundHttp;
+use temper_wasm_sdk::http_stream::{InboundHttp, streaming_call};
 use temper_wasm_sdk::prelude::*;
 use tg_wire::{
     AdvertisedRef, CommandKind, Service, advertise_info_refs, commands, encode_into, flush, pack,
@@ -53,6 +53,8 @@ const COMMAND_LIST_MAX_BYTES: usize = 1 * 1024 * 1024;
 /// the pack parser doesn't churn through tiny `fill_buf` cycles,
 /// small enough that the WASM heap isn't pinned by a giant buffer.
 const BUFREAD_CAPACITY: usize = 64 * 1024;
+const OUTBOUND_READ_CHUNK: usize = 64 * 1024;
+const MAX_OBJECT_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const TEMPER_API: &str = "http://127.0.0.1:3000";
 pub(crate) const SYSTEM_TENANT: &str = "default";
 pub(crate) const SYSTEM_PRINCIPAL: &str = "git-receive-pack";
@@ -168,81 +170,102 @@ fn serve_receive_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String
     let mut per_obj_errors: Vec<String> = Vec::new();
     let mut object_count = 0u32;
 
-    let mut parser =
-        pack::StreamingPackParser::begin(reader).map_err(|e| format!("pack header: {e}"))?;
-    while let Some(obj) = parser
-        .next_object()
-        .map_err(|e| format!("pack next: {e}"))?
+    if parsed
+        .commands
+        .iter()
+        .any(|cmd| cmd.kind() != CommandKind::Delete)
     {
-        // Blobs go through the streaming-binary `Temper.IngestRaw`
-        // endpoint: the body is sent as raw octets and the kernel
-        // computes the SHA + persists the row, so we skip the
-        // base64+JSON round-trip that costs ~2.6× the body size on
-        // both sides.
-        if matches!(obj.kind, pack::ObjectKind::Blob) {
-            match ingest_blob_streaming(&principal, &repository_id, &obj.data) {
-                Ok(_) => {}
+        let mut parser =
+            pack::StreamingPackParser::begin(reader).map_err(|e| format!("pack header: {e}"))?;
+        while let Some(obj) = parser
+            .next_object_with_ref_delta_base(|sha| {
+                fetch_existing_delta_base(&principal, &repository_id, sha)
+                    .map_err(|e| pack::PackError::DeltaBaseMissing(format!("{sha}: {e}")))
+            })
+            .map_err(|e| format!("pack next: {e}"))?
+        {
+            // Blobs go through the streaming-binary `Temper.IngestRaw`
+            // endpoint: the body is sent as raw octets and the kernel
+            // computes the SHA + persists the row, so we skip the
+            // base64+JSON round-trip that costs ~2.6× the body size on
+            // both sides.
+            if matches!(obj.kind, pack::ObjectKind::Blob) {
+                match ingest_blob_streaming(&principal, &repository_id, &obj.data) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        unpack_status = format!("error ingesting blob: {e}");
+                        per_obj_errors.push(format!("blob:{e}"));
+                    }
+                }
+                object_count += 1;
+                continue;
+            }
+
+            // Tree / Commit / Tag stay on the JSON path. They're small
+            // (typically a few hundred bytes), and Commit + Tag rows
+            // need parsed metadata fields anyway, so the existing
+            // `build_object_row` flow is the right shape.
+            let (kind_prefix, entity_set) = match obj.kind {
+                pack::ObjectKind::Tree => ("tree", "Trees"),
+                pack::ObjectKind::Commit => ("commit", "Commits"),
+                pack::ObjectKind::Tag => ("tag", "Tags"),
+                pack::ObjectKind::Blob => unreachable!("blob handled above"),
+            };
+            let sha = sha_from_prefix(kind_prefix, &obj.data);
+            let mut canonical = format!("{} {}\0", kind_prefix, obj.data.len()).into_bytes();
+            canonical.extend_from_slice(&obj.data);
+
+            let row = build_object_row(obj.kind, &sha, &repository_id, &obj.data, &canonical);
+            let url = format!("{TEMPER_API}/tdata/{entity_set}");
+            let body_json = row.to_string();
+            match post_json(ctx, &principal, &url, &body_json) {
+                Ok(resp) if (200..400).contains(&resp.status) => {}
+                Ok(resp) => {
+                    if resp.status == 409 {
+                        object_count += 1;
+                        continue;
+                    }
+                    unpack_status = format!("error status {} on {sha}", resp.status);
+                    per_obj_errors.push(format!("{sha}:{}", resp.status));
+                }
                 Err(e) => {
-                    unpack_status = format!("error ingesting blob: {e}");
-                    per_obj_errors.push(format!("blob:{e}"));
+                    unpack_status = format!("error writing {sha}: {e}");
+                    per_obj_errors.push(format!("{sha}:{e}"));
                 }
             }
             object_count += 1;
-            continue;
+            // `obj.data` and `canonical` drop here — only the next
+            // object's bytes will be live in WASM memory.
         }
-
-        // Tree / Commit / Tag stay on the JSON path. They're small
-        // (typically a few hundred bytes), and Commit + Tag rows
-        // need parsed metadata fields anyway, so the existing
-        // `build_object_row` flow is the right shape.
-        let (kind_prefix, entity_set) = match obj.kind {
-            pack::ObjectKind::Tree => ("tree", "Trees"),
-            pack::ObjectKind::Commit => ("commit", "Commits"),
-            pack::ObjectKind::Tag => ("tag", "Tags"),
-            pack::ObjectKind::Blob => unreachable!("blob handled above"),
-        };
-        let sha = sha_from_prefix(kind_prefix, &obj.data);
-        let mut canonical = format!("{} {}\0", kind_prefix, obj.data.len()).into_bytes();
-        canonical.extend_from_slice(&obj.data);
-
-        let row = build_object_row(obj.kind, &sha, &repository_id, &obj.data, &canonical);
-        let url = format!("{TEMPER_API}/tdata/{entity_set}");
-        let body_json = row.to_string();
-        match post_json(ctx, &principal, &url, &body_json) {
-            Ok(resp) if (200..400).contains(&resp.status) => {}
-            Ok(resp) => {
-                if resp.status == 409 {
-                    object_count += 1;
-                    continue;
-                }
-                unpack_status = format!("error status {} on {sha}", resp.status);
-                per_obj_errors.push(format!("{sha}:{}", resp.status));
-            }
-            Err(e) => {
-                unpack_status = format!("error writing {sha}: {e}");
-                per_obj_errors.push(format!("{sha}:{e}"));
-            }
+        // Verify the trailer — only meaningful if every object decoded.
+        if let Err(e) = parser.finish() {
+            unpack_status = format!("trailer: {e}");
+            per_obj_errors.push(format!("trailer:{e}"));
         }
-        object_count += 1;
-        // `obj.data` and `canonical` drop here — only the next
-        // object's bytes will be live in WASM memory.
-    }
-    // Verify the trailer — only meaningful if every object decoded.
-    if let Err(e) = parser.finish() {
-        unpack_status = format!("trailer: {e}");
-        per_obj_errors.push(format!("trailer:{e}"));
     }
 
     // Apply ref updates. Each command produces a per-ref status line.
     let mut ref_statuses: Vec<(String, Result<(), String>)> = Vec::new();
+    let existing_refs = if per_obj_errors.is_empty() {
+        Some(fetch_refs_for_repo(ctx, &principal, &repository_id))
+    } else {
+        None
+    };
     for cmd in &parsed.commands {
         let result = if !per_obj_errors.is_empty() {
             Err(alloc::format!(
                 "object write failures: {}",
                 per_obj_errors.len()
             ))
+        } else if let Some(Err(e)) = &existing_refs {
+            Err(format!("fetch refs: {e}"))
         } else {
-            apply_ref_command(ctx, &principal, &repository_id, cmd)
+            let refs = existing_refs
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            apply_ref_command(ctx, &principal, &repository_id, refs, cmd)
         };
         ref_statuses.push((cmd.refname.clone(), result));
     }
@@ -343,8 +366,10 @@ fn ingest_blob_streaming(
     ));
     owned.push(("Content-Length".to_string(), content_length));
     owned.push(("X-Repository-Id".to_string(), repository_id.to_string()));
-    let header_refs: Vec<(&str, &str)> =
-        owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let header_refs: Vec<(&str, &str)> = owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
 
     let (mut req, mut resp, head) = streaming_call("POST", &url, &header_refs)
         .map_err(|e| format!("ingest stream begin: {e}"))?;
@@ -376,14 +401,112 @@ fn ingest_blob_streaming(
     parsed
         .get("Id")
         .and_then(|v| v.as_str())
+        .or_else(|| {
+            parsed
+                .get("fields")
+                .and_then(|fields| fields.get("Id"))
+                .and_then(|v| v.as_str())
+        })
         .map(String::from)
         .ok_or_else(|| "ingest response missing Id".to_string())
+}
+
+fn fetch_existing_delta_base(
+    principal: &Principal,
+    _repository_id: &str,
+    sha: &str,
+) -> Result<Option<pack::PackObject>, String> {
+    for (kind, set) in [
+        (pack::ObjectKind::Commit, "Commits"),
+        (pack::ObjectKind::Tree, "Trees"),
+        (pack::ObjectKind::Blob, "Blobs"),
+        (pack::ObjectKind::Tag, "Tags"),
+    ] {
+        if let Some(data) = fetch_existing_object_body(principal, set, sha)? {
+            return Ok(Some(pack::PackObject { kind, data }));
+        }
+    }
+    Ok(None)
+}
+
+fn fetch_existing_object_body(
+    principal: &Principal,
+    set: &str,
+    sha: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let url = format!("{TEMPER_API}/tdata/{set}?$filter=Id%20eq%20'{sha}'");
+    let (status, body) =
+        streaming_get(principal, &url).map_err(|e| format!("fetch {set}({sha}): {e}"))?;
+    if !(200..400).contains(&status) {
+        return Err(format!("{set}({sha}) status {status}"));
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("object json: {e}"))?;
+    let row = parsed
+        .get("value")
+        .and_then(|v| v.as_array())
+        .and_then(|items| items.first())
+        .cloned();
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let fields = row
+        .get("fields")
+        .ok_or_else(|| format!("{set}({sha}): row has no fields"))?;
+    let canonical_b64 = fields
+        .get("CanonicalBytes")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("{set}({sha}): no CanonicalBytes"))?;
+    let canonical = B64
+        .decode(canonical_b64)
+        .map_err(|e| format!("base64 decode: {e}"))?;
+    let nul = canonical
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or_else(|| format!("{set}({sha}): no NUL in canonical"))?;
+    Ok(Some(canonical[nul + 1..].to_vec()))
+}
+
+fn streaming_get(principal: &Principal, url: &str) -> Result<(u16, String), String> {
+    let headers = principal.outbound_headers();
+    let header_refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
+    let (request, mut response, head) =
+        streaming_call("GET", url, &header_refs).map_err(|e| format!("stream begin: {e}"))?;
+    request
+        .finish()
+        .map_err(|e| format!("stream request close: {e}"))?;
+    let head = head().map_err(|e| format!("stream response head: {e}"))?;
+
+    let mut body = Vec::new();
+    let mut scratch = alloc::vec![0u8; OUTBOUND_READ_CHUNK];
+    loop {
+        match response.read_next_chunk(&mut scratch) {
+            Ok(None) => break,
+            Ok(Some(n)) => {
+                if body.len() + n > MAX_OBJECT_RESPONSE_BYTES {
+                    return Err(format!(
+                        "stream response exceeds {MAX_OBJECT_RESPONSE_BYTES} bytes"
+                    ));
+                }
+                body.extend_from_slice(&scratch[..n]);
+            }
+            Err(e) => return Err(format!("stream response read: {e}")),
+        }
+    }
+
+    let body = String::from_utf8(body).map_err(|e| format!("stream response utf8: {e}"))?;
+    Ok((head.status, body))
 }
 
 fn apply_ref_command(
     ctx: &Context,
     principal: &Principal,
     repository_id: &str,
+    existing_refs: &[RefRow],
     cmd: &tg_wire::RefCommand,
 ) -> Result<(), String> {
     match cmd.kind() {
@@ -411,7 +534,7 @@ fn apply_ref_command(
             // routes the change through the entity's state machine
             // so any [[integration]] triggers (webhooks, projection
             // rebuilds, …) fire on the canonical event.
-            let ref_id = ref_id_for(repository_id, &cmd.refname);
+            let ref_id = ref_entity_id_for(existing_refs, repository_id, &cmd.refname);
             let body = json!({
                 "PreviousCommitSha": cmd.old_sha,
                 "NewCommitSha": cmd.new_sha,
@@ -425,7 +548,7 @@ fn apply_ref_command(
             Ok(())
         }
         CommandKind::Delete => {
-            let ref_id = ref_id_for(repository_id, &cmd.refname);
+            let ref_id = ref_entity_id_for(existing_refs, repository_id, &cmd.refname);
             let url = format!("{TEMPER_API}/tdata/Refs('{ref_id}')/Temper.Delete");
             let resp = post_json(ctx, principal, &url, "{}")?;
             if !(200..400).contains(&resp.status) {
@@ -446,6 +569,7 @@ fn effective_principal(ctx: &Context, headers: &[(String, String)]) -> Principal
 }
 
 struct RefRow {
+    entity_id: String,
     name: String,
     target_sha: String,
     status: String,
@@ -498,10 +622,18 @@ fn fetch_refs_for_repo(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let entity_id = row
+            .get("entity_id")
+            .or_else(|| row.get("id"))
+            .and_then(|v| v.as_str())
+            .or_else(|| fields.get("Id").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
         if name.is_empty() || target_sha.is_empty() {
             continue;
         }
         rows.push(RefRow {
+            entity_id,
             name,
             target_sha,
             status,
@@ -513,6 +645,14 @@ fn fetch_refs_for_repo(
 
 fn ref_id_for(repository_id: &str, refname: &str) -> String {
     format!("rf-{}-{}", repository_id, refname.replace('/', "-"))
+}
+
+fn ref_entity_id_for(existing_refs: &[RefRow], repository_id: &str, refname: &str) -> String {
+    existing_refs
+        .iter()
+        .find(|r| r.name == refname && r.status == "Active" && !r.entity_id.is_empty())
+        .map(|r| r.entity_id.clone())
+        .unwrap_or_else(|| ref_id_for(repository_id, refname))
 }
 
 /// After a ref advances, fire `PullRequest.UpdateHead` on every PR

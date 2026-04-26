@@ -8,6 +8,17 @@
 
 // --- Read: same visibility rules as the owning repo.
 
+// The smart-HTTP receive-pack WASM performs internal ref mutations on behalf of
+// anonymous dev setups after it has already parsed and validated the git wire
+// command. Keep this permit narrow: it covers normal create/update/delete
+// actions but does not grant `admin:repos`, so the default-branch forbid below
+// still applies.
+permit(
+  principal == Admin::"git-receive-pack",
+  action in [Action::"Create", Action::"Update", Action::"Delete"],
+  resource is Ref
+);
+
 permit(
   principal,
   action in [Action::"read", Action::"list"],
