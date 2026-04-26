@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use tg_wire::{parse_pack, ObjectKind};
+use tg_wire::{ObjectKind, parse_pack};
 
 fn git_available() -> bool {
     Command::new("git")
@@ -17,12 +17,14 @@ fn git_available() -> bool {
 }
 
 fn init_working(dir: &Path) {
-    assert!(Command::new("git")
-        .args(["init", "--quiet"])
-        .arg(dir)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(dir)
+            .status()
+            .unwrap()
+            .success()
+    );
     for (k, v) in [
         ("user.name", "Tester"),
         ("user.email", "t@example.invalid"),
@@ -54,7 +56,13 @@ fn build_pack_from_repo(dir: &Path) -> Vec<u8> {
     // List every object via `git rev-list --objects --all`, pipe
     // to `git pack-objects` with `--stdout` to capture the pack.
     let list = Command::new("git")
-        .args(["-C", dir.to_str().unwrap(), "rev-list", "--objects", "--all"])
+        .args([
+            "-C",
+            dir.to_str().unwrap(),
+            "rev-list",
+            "--objects",
+            "--all",
+        ])
         .output()
         .unwrap();
     assert!(list.status.success());
@@ -90,11 +98,47 @@ fn build_pack_from_repo(dir: &Path) -> Vec<u8> {
         .unwrap();
     {
         use std::io::Write;
-        pack.stdin
-            .as_mut()
-            .unwrap()
-            .write_all(&sha_list)
-            .unwrap();
+        pack.stdin.as_mut().unwrap().write_all(&sha_list).unwrap();
+    }
+    let out = pack.wait_with_output().unwrap();
+    assert!(out.status.success(), "pack-objects failed: {:?}", out);
+    out.stdout
+}
+
+fn build_default_pack_from_repo(dir: &Path) -> Vec<u8> {
+    let list = Command::new("git")
+        .args([
+            "-C",
+            dir.to_str().unwrap(),
+            "rev-list",
+            "--objects",
+            "--all",
+        ])
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let sha_list: Vec<u8> = list
+        .stdout
+        .split(|b| *b == b'\n')
+        .filter_map(|line| line.split(|b| *b == b' ').next())
+        .filter(|s| !s.is_empty())
+        .flat_map(|s| {
+            let mut v = s.to_vec();
+            v.push(b'\n');
+            v
+        })
+        .collect();
+
+    let mut pack = Command::new("git")
+        .args(["-C", dir.to_str().unwrap(), "pack-objects", "--stdout"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        pack.stdin.as_mut().unwrap().write_all(&sha_list).unwrap();
     }
     let out = pack.wait_with_output().unwrap();
     assert!(out.status.success(), "pack-objects failed: {:?}", out);
@@ -107,10 +151,7 @@ fn parse_pack_from_single_commit_repo() {
         eprintln!("git not available; skipping");
         return;
     }
-    let tmp = std::env::temp_dir().join(format!(
-        "tg-wire-pack-parity-{}",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("tg-wire-pack-parity-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     init_working(&tmp);
@@ -141,10 +182,7 @@ fn parse_pack_from_single_commit_repo() {
         h.update(header.as_bytes());
         h.update(&obj.data);
         let sha = h.finalize();
-        let sha_hex = sha
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>();
+        let sha_hex = sha.iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
         let check = Command::new("git")
             .args(["-C", tmp.to_str().unwrap(), "cat-file", "-t"])
@@ -169,10 +207,7 @@ fn parse_pack_from_multi_commit_repo() {
         eprintln!("git not available; skipping");
         return;
     }
-    let tmp = std::env::temp_dir().join(format!(
-        "tg-wire-pack-multi-{}",
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("tg-wire-pack-multi-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     init_working(&tmp);
@@ -189,6 +224,49 @@ fn parse_pack_from_multi_commit_repo() {
     assert_eq!(commits, 3);
     assert_eq!(trees, 3);
     assert_eq!(blobs, 3);
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn parse_pack_from_default_delta_and_large_blob_repo() {
+    if !git_available() {
+        eprintln!("git not available; skipping");
+        return;
+    }
+    let tmp =
+        std::env::temp_dir().join(format!("tg-wire-pack-default-delta-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    init_working(&tmp);
+
+    let base = "alpha beta gamma delta epsilon\n".repeat(256);
+    let variant = base.replace("gamma", "temper");
+    std::fs::write(tmp.join("base.txt"), base).unwrap();
+    std::fs::write(tmp.join("variant.txt"), variant).unwrap();
+    std::fs::write(tmp.join("large.bin"), vec![b'x'; 300_000]).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["-C", tmp.to_str().unwrap(), "add", "."])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["-C", tmp.to_str().unwrap(), "commit", "-m", "default pack"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let pack = build_default_pack_from_repo(&tmp);
+    let objs = parse_pack(&pack).expect("default git pack parses");
+    assert!(
+        objs.iter()
+            .any(|obj| obj.kind == ObjectKind::Blob && obj.data.len() == 300_000),
+        "large blob missing from parsed pack"
+    );
 
     std::fs::remove_dir_all(&tmp).ok();
 }
