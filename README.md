@@ -165,7 +165,9 @@ temper-git bundle from the current directory:
 
 ```bash
 # Terminal A
-TEMPER_OS_APPS_DIR="$PWD" cargo run \
+# TEMPER_OS_APPS_DIR points at the app catalog directory containing this
+# temper-git checkout.
+TEMPER_OS_APPS_DIR="$(cd .. && pwd)" cargo run \
   --manifest-path temper/Cargo.toml \
   --release --bin temper \
   -- serve --port 3000 --storage turso --skill temper-git
