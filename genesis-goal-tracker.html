@@ -41,7 +41,7 @@
       }
       .hero-copy { display: grid; gap: 12px; }
       .meter { height: 12px; border-radius: 999px; background: #e4e9e5; overflow: hidden; }
-      .meter span { display: block; width: 90%; height: 100%; background: #1b716c; }
+      .meter span { display: block; width: 91%; height: 100%; background: #1b716c; }
       .percent { font-size: 52px; line-height: 1; font-weight: 760; color: #1b716c; }
       .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
       .metric { padding: 14px; min-height: 92px; display: grid; align-content: space-between; }
@@ -71,20 +71,20 @@
     <main>
       <header class="hero">
         <div class="hero-copy">
-          <p class="muted">Last updated: 2026-05-20 13:30 EDT</p>
+          <p class="muted">Last updated: 2026-05-20 13:36 EDT</p>
           <h1>Genesis-Only Install and Railway Deployment</h1>
           <p class="muted">Two-PR implementation tracking for Temper platform install support plus the Genesis registry, UI, live proof, and Railway packaging.</p>
-          <div class="meter" aria-label="90 percent complete"><span></span></div>
+          <div class="meter" aria-label="91 percent complete"><span></span></div>
         </div>
         <div>
-          <div class="percent">90%</div>
-          <p class="muted">Local implementation, verification, and PR targets are ready. Railway deployment is blocked by CLI authentication.</p>
+          <div class="percent">91%</div>
+          <p class="muted">Local implementation and verification are green. Both PR branches are pushed and ready; Railway deployment is blocked by CLI authentication.</p>
         </div>
       </header>
 
       <section class="metrics">
-        <div class="metric"><span class="muted">Temper PR</span><strong><a href="https://github.com/nerdsane/temper/pull/257">#257</a></strong><span class="muted">Branch: feat/genesis-kernel-primitives</span></div>
-        <div class="metric"><span class="muted">Genesis PR</span><strong><a href="https://github.com/nerdsane/temper-git/pull/5">#5</a></strong><span class="muted">Branch: feat/genesis</span></div>
+        <div class="metric"><span class="muted">Temper PR</span><strong><a href="https://github.com/nerdsane/temper/pull/257">#257</a></strong><span class="muted">Pushed and ready</span></div>
+        <div class="metric"><span class="muted">Genesis PR</span><strong><a href="https://github.com/nerdsane/temper-git/pull/5">#5</a></strong><span class="muted">Pushed and ready</span></div>
         <div class="metric"><span class="muted">Local E2E</span><strong>Pass</strong><span class="muted">OData, TemperPaw-shaped, CLI, restart recovery</span></div>
         <div class="metric"><span class="muted">Railway E2E</span><strong>Blocked</strong><span class="muted"><code>railway whoami</code> is unauthorized</span></div>
       </section>
@@ -100,13 +100,13 @@
             <li><span class="dot done"></span><span>Removed runtime app-as-skill aliases and bypass sources: <code>--skill</code>, <code>/api/skills</code>, <code>TEMPER_APP_SOURCES</code>, <code>TEMPER_SKILLS_DIR</code>, legacy <code>./skills</code>, and production catalog auto-install.</span></li>
             <li><span class="dot done"></span><span>Updated the Genesis UI into a cleaner registry workbench with GitHub-like file browsing and copyable install commands.</span></li>
             <li><span class="dot done"></span><span>Added root Railway packaging: <code>Dockerfile</code>, <code>.dockerignore</code>, and <code>railway.toml</code>.</span></li>
+            <li><span class="dot done"></span><span>Pushed the two existing ready-for-review PRs: Temper <a href="https://github.com/nerdsane/temper/pull/257">#257</a> and Genesis <a href="https://github.com/nerdsane/temper-git/pull/5">#5</a>.</span></li>
           </ul>
         </article>
 
         <article class="panel">
           <h2>Remaining</h2>
           <ul>
-            <li><span class="dot active"></span><span>Use the existing two PRs only: Temper <a href="https://github.com/nerdsane/temper/pull/257">#257</a> and Genesis <a href="https://github.com/nerdsane/temper-git/pull/5">#5</a>.</span></li>
             <li><span class="dot blocked"></span><span>Refresh Railway authentication, link/create the dedicated Genesis service, attach Railway Postgres, deploy, and run the public URL smoke.</span></li>
             <li><span class="dot"></span><span>After Railway auth is available, verify <code>/healthz</code>, <code>/genesis/</code>, OData metadata, app registration, <code>App.Install</code>, installed app usability, and restart recovery on the public service.</span></li>
           </ul>
