@@ -14,9 +14,9 @@
 //! byte order. See [`sort_entries`] for the implementation; the tests
 //! pin it against well-known tree hashes.
 
+use crate::Oid;
 use crate::mode::Mode;
 use crate::sha1::Sha1;
-use crate::Oid;
 
 /// One entry in a tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,12 +78,7 @@ fn sort_entries(entries: &mut [TreeEntry]) {
     });
 }
 
-fn compare_names(
-    a: &[u8],
-    a_is_tree: bool,
-    b: &[u8],
-    b_is_tree: bool,
-) -> std::cmp::Ordering {
+fn compare_names(a: &[u8], a_is_tree: bool, b: &[u8], b_is_tree: bool) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let len = a.len().min(b.len());
     for i in 0..len {

@@ -80,17 +80,22 @@ fn serve_info_refs(ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
     let repository_id = format!("rp-{owner}-{repo}");
 
     let principal = effective_principal(ctx, &http.headers);
+    let api_base = temper_api_from_headers(&http.headers);
 
     // Query /tdata/Refs and filter client-side on RepositoryId. We
     // don't assume $filter support yet; the payload is small enough
     // (tens of refs typical) that full-list-then-filter is fine.
-    let refs_rows = fetch_refs_for_repo(ctx, &principal, &repository_id)?;
+    let refs_rows = fetch_refs_for_repo(ctx, &principal, &repository_id, &api_base)?;
 
-    let owned: Vec<(String, String)> = refs_rows
+    let mut owned: Vec<(String, String)> = refs_rows
         .into_iter()
         .filter(|r| r.status == "Active")
         .map(|r| (r.target_sha, r.name))
         .collect();
+    let default_branch =
+        fetch_repository_default_branch(ctx, &principal, &repository_id, &api_base)
+            .unwrap_or_else(|_| "main".to_string());
+    add_symbolic_head_advertisement(&mut owned, &default_branch);
     let refs: Vec<AdvertisedRef<'_>> = owned
         .iter()
         .map(|(sha, name)| AdvertisedRef {
@@ -123,6 +128,7 @@ fn serve_info_refs(ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
         "bytes_written": body.len(),
         "ref_count": refs.len(),
         "repository_id": repository_id,
+        "default_branch": default_branch,
     }))
 }
 
@@ -136,8 +142,9 @@ fn fetch_refs_for_repo(
     ctx: &Context,
     principal: &Principal,
     repository_id: &str,
+    api_base: &str,
 ) -> Result<Vec<RefRow>, String> {
-    let url = format!("{TEMPER_API}/tdata/Refs");
+    let url = format!("{api_base}/tdata/Refs");
     let resp = ctx
         .http_call("GET", &url, &principal.outbound_headers(), "")
         .map_err(|e| format!("fetch refs: {e}"))?;
@@ -201,6 +208,48 @@ fn fetch_refs_for_repo(
     Ok(rows)
 }
 
+fn fetch_repository_default_branch(
+    ctx: &Context,
+    principal: &Principal,
+    repository_id: &str,
+    api_base: &str,
+) -> Result<String, String> {
+    let url = format!("{api_base}/tdata/Repositories('{repository_id}')");
+    let resp = ctx
+        .http_call("GET", &url, &principal.outbound_headers(), "")
+        .map_err(|e| format!("fetch repository: {e}"))?;
+    if !(200..400).contains(&resp.status) {
+        return Err(format!("fetch repository status {}", resp.status));
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(&resp.body).map_err(|e| format!("repository parse: {e}"))?;
+    let default_branch = parsed
+        .get("fields")
+        .and_then(|v| v.get("DefaultBranch"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("main")
+        .trim();
+    if default_branch.is_empty() {
+        Ok("main".to_string())
+    } else {
+        Ok(default_branch.to_string())
+    }
+}
+
+fn add_symbolic_head_advertisement(refs: &mut Vec<(String, String)>, default_branch: &str) {
+    if refs.iter().any(|(_, name)| name == "HEAD") {
+        return;
+    }
+    let default_ref = if default_branch.starts_with("refs/") {
+        default_branch.to_string()
+    } else {
+        format!("refs/heads/{default_branch}")
+    };
+    if let Some((sha, _)) = refs.iter().find(|(_, name)| name == &default_ref) {
+        refs.insert(0, (sha.clone(), "HEAD".to_string()));
+    }
+}
+
 /// Resolve the inbound caller and fall back to the system principal
 /// if none is presented. Production deployments lock down via Cedar
 /// to require a real GitToken; dev quickstarts work without one.
@@ -211,6 +260,14 @@ fn effective_principal(ctx: &Context, headers: &[(String, String)]) -> Principal
     } else {
         resolved
     }
+}
+
+fn temper_api_from_headers(headers: &[(String, String)]) -> String {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+        .map(|(_, v)| format!("http://{v}"))
+        .unwrap_or_else(|| TEMPER_API.to_string())
 }
 
 fn respond_text(
@@ -251,6 +308,7 @@ const MAX_OBJECT_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 fn serve_upload_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String> {
     let principal = effective_principal(ctx, &http.headers);
+    let api_base = temper_api_from_headers(&http.headers);
     // 1. Read the request body. Bounded: want/have negotiation
     //    payloads are tiny (a few KB even for huge repos), so we
     //    cap at 16 MiB and buffer.
@@ -297,7 +355,8 @@ fn serve_upload_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String>
         }
         match kind {
             ObjectKind::Commit | ObjectKind::Tree => {
-                let raw_body = fetch_object_body(&principal, kind, &sha, &repository_id)?;
+                let raw_body =
+                    fetch_object_body(&principal, kind, &sha, &repository_id, &api_base)?;
                 if matches!(kind, ObjectKind::Commit) {
                     let refs = tg_canonical::parse_commit_refs(&raw_body)
                         .map_err(|e| format!("commit {sha}: {e}"))?;
@@ -366,6 +425,7 @@ fn serve_upload_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String>
             graph_cache,
             &repository_id,
             &principal,
+            &api_base,
         )?;
         sb.finish().map_err(|e| format!("sideband finish: {e}"))?;
         pack_byte_count
@@ -377,6 +437,7 @@ fn serve_upload_pack(ctx: &Context, http: &InboundHttp) -> Result<Value, String>
             graph_cache,
             &repository_id,
             &principal,
+            &api_base,
         )?;
         pack_byte_count
     };
@@ -406,6 +467,7 @@ fn emit_pack_streaming<W: std::io::Write>(
     mut graph_cache: BTreeMap<String, Vec<u8>>,
     repository_id: &str,
     principal: &Principal,
+    api_base: &str,
 ) -> Result<(usize, W), String> {
     // Wrap the sink in a counting writer so we can report bytes
     // written without the caller having to track them.
@@ -419,7 +481,7 @@ fn emit_pack_streaming<W: std::io::Write>(
                 .remove(&sha)
                 .ok_or_else(|| format!("walk-cache miss for {sha}"))?,
             ObjectKind::Blob | ObjectKind::Tag => {
-                fetch_object_body(principal, kind, &sha, repository_id)?
+                fetch_object_body(principal, kind, &sha, repository_id, api_base)?
             }
         };
         emitter
@@ -553,7 +615,8 @@ fn fetch_object_body(
     principal: &Principal,
     kind: ObjectKind,
     sha: &str,
-    _repo_id: &str,
+    repo_id: &str,
+    api_base: &str,
 ) -> Result<Vec<u8>, String> {
     let set = match kind {
         ObjectKind::Commit => "Commits",
@@ -561,9 +624,14 @@ fn fetch_object_body(
         ObjectKind::Blob => "Blobs",
         ObjectKind::Tag => "Tags",
     };
-    // Temper auto-assigns entity_id as a UUID; our SHA lives in the
-    // `Id` field. Use $filter to look it up rather than the key URL.
-    let url = format!("{TEMPER_API}/tdata/{set}?$filter=Id%20eq%20'{sha}'");
+    // Stored entity ids are repository-scoped so shared Git objects can appear
+    // in multiple repos. The Git SHA stays in the Id field.
+    let filter = format!(
+        "Id eq '{}' and RepositoryId eq '{}'",
+        sha.replace('\'', "''"),
+        repo_id.replace('\'', "''")
+    );
+    let url = format!("{api_base}/tdata/{set}?$filter={}", urlencode(&filter));
     let (status, body) =
         streaming_get(principal, &url).map_err(|e| format!("fetch {set}({sha}): {e}"))?;
     if !(200..400).contains(&status) {
@@ -595,6 +663,19 @@ fn fetch_object_body(
         .position(|&b| b == 0)
         .ok_or_else(|| format!("{set}({sha}): no NUL in canonical"))?;
     Ok(canonical[nul + 1..].to_vec())
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 fn streaming_get(principal: &Principal, url: &str) -> Result<(u16, String), String> {

@@ -127,19 +127,68 @@ byte-for-byte parity with what git expects. Any tool that speaks to a
 standard git server should speak to this one, and if it doesn't,
 that's a bug.
 
-## What I'm NOT trying to build
+## Scope expansion (2026-05-18)
 
-- **A replacement for GitHub as a public collaboration platform.** This
+The original VISION (above) treats temper-git as a single-operator
+substrate. As the TemperPaw ecosystem developed, three problems
+showed up that the single-operator scope couldn't solve: apps live
+scattered with no canonical home, no sharing across operators, no
+lineage record when an agent forks or imports.
+
+[ADR-0004](docs/adr/0004-registry-scope-absorption.md) and
+[RFC-0003](docs/rfc/0003-genesis-app-registry.md) capture the
+decision: temper-git absorbs the registry as first-class scope. This
+moves several previously-stated non-goals (below) into v1.
+
+Things now in scope:
+
+- **App-level entities** (`App`, `Lineage`, `Closure`, `Owner`) for
+  registering, forking, and pinning dependency closures.
+- **Two deployment modes:** operator mode (existing, single-owner)
+  and commons mode (new, multi-tenant by owner, rate-limited, abuse-
+  bounded). Same code; different configuration.
+- **A web UI (Genesis)** for browsing, lineage visualization, and
+  account management.
+- **Cost-bounding guardrails** for the public commons (per-owner
+  storage caps, write/pull rate limits, content-addressed dedup).
+- **Metadata-only forks** via a `Lineage` sidecar entity. The git
+  layer itself stays at byte-exact compatibility; "fork" is registry
+  metadata, not a git primitive.
+
+Things still NOT in scope:
+
+- **Publisher signing** beyond API auth at the commons gate (v2).
+- **Multi-commons federation** (forward-compatible; not shipped v1).
+- **Hybridize as a first-class action.** Multi-parent grafts are
+  captured as `imported` mutations on single-parent forks; the DAG
+  projection renders them already.
+- **Browser-based source viewer.** `git clone` covers code browsing;
+  Genesis covers app-level views.
+- **Git LFS, submodule-first workflows.** Still not v1.
+- **Bare-push p50 vs. Gitea or huge-monorepo binary ops vs. Sapling.**
+  Scoping decisions justified in RFC-0003 §16.
+
+## What I'm NOT trying to build (original — superseded by scope expansion above)
+
+- **A replacement for GitHub as a public collaboration platform.** ~~This
   is version control tailored for a specific operational pattern, not
-  a product play against an established one.
-- **A browser-based code browsing UI.** For now, humans who want to
+  a product play against an established one.~~ *Updated 2026-05-18:
+  temper-git in commons mode is a public collaboration platform for
+  Temper apps specifically.*
+- **A browser-based code browsing UI.** ~~For now, humans who want to
   browse read through git clients or through outbound read-only
-  mirrors.
+  mirrors.~~ *Updated 2026-05-18: Genesis ships v1 with app-level
+  browsing and lineage visualization. Source-level browsing (file
+  viewer) remains out of scope; use `git clone`.*
 - **Git LFS, submodule-first workflows, or "fork" semantics as v1
-  features.** Possibly later; not goals now.
-- **Hosted multi-tenant SaaS.** The project is meant to be run inside
+  features.** *Updated 2026-05-18: "fork" is now v1 — implemented as
+  metadata via the `Lineage` entity, not as a git-layer primitive.
+  LFS and submodule-first workflows remain out of scope.*
+- **Hosted multi-tenant SaaS.** ~~The project is meant to be run inside
   one operator's environment. Public hosting is somebody else's
-  problem.
+  problem.~~ *Updated 2026-05-18: commons mode is multi-tenant by
+  owner. Sesh operates the default commons. Federation (multiple
+  commons) deferred to v2.*
 
 ## What I don't know yet
 

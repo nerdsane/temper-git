@@ -11,6 +11,7 @@
 name = "Webhook"
 states = ["Active", "Paused", "Deleted"]
 initial = "Active"
+allow_indefinite_states = ["Active", "Paused"]
 
 # --- Actions ---
 

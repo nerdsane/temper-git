@@ -53,10 +53,14 @@ authoritative protocol. See
 
 ## Installation
 
-As a Temper OS-app. Drop the bundle into the kernel's
-`TEMPER_OS_APPS_DIR` and set `TEMPER_AUTO_INSTALL_APPS=true`; Temper
-discovers the app on boot, verifies specs through L0–L3, registers
-the entity sets, and wires the HTTP routes.
+Genesis is the single bootstrapped app source for a Temper deployment.
+The bootstrap bundle is loaded with `--app temper-git`; all normal apps
+are then installed from Genesis by pinned ref through `App.Install`, for
+example:
 
-For local testing, the [README](README.md) quickstart runs it all on
-a single machine with an embedded database.
+```bash
+temper install owner/app@hash --tenant default --url "$TEMPER_URL"
+```
+
+For local testing, the [README](README.md) quickstart runs it all on a
+single machine with an embedded database.

@@ -76,9 +76,9 @@ pub fn parse_commit(body: &[u8]) -> Result<ParsedCommit, &'static str> {
     // message_block starts with the blank "\n\n" or "\n"; strip the
     // single header-terminating newline so the message itself starts
     // cleanly.
-    let message = message_block.strip_prefix("\n\n").unwrap_or(
-        message_block.strip_prefix('\n').unwrap_or(message_block),
-    );
+    let message = message_block
+        .strip_prefix("\n\n")
+        .unwrap_or(message_block.strip_prefix('\n').unwrap_or(message_block));
 
     let headers = collect_headers(header_block);
     let mut tree: Option<String> = None;
@@ -125,9 +125,9 @@ pub fn parse_tag(body: &[u8]) -> Result<ParsedTag, &'static str> {
     let text = core::str::from_utf8(body).map_err(|_| "tag body not UTF-8")?;
     let blank = find_blank_header_line(text).ok_or("tag missing blank line")?;
     let (header_block, message_block) = text.split_at(blank);
-    let message = message_block.strip_prefix("\n\n").unwrap_or(
-        message_block.strip_prefix('\n').unwrap_or(message_block),
-    );
+    let message = message_block
+        .strip_prefix("\n\n")
+        .unwrap_or(message_block.strip_prefix('\n').unwrap_or(message_block));
 
     let mut object: Option<String> = None;
     let mut target_type: Option<String> = None;
@@ -223,8 +223,9 @@ pub fn parse_tree(body: &[u8]) -> Result<Vec<ParsedTreeEntry>, &'static str> {
             None => return Err("tree entry missing mode-separator space"),
         };
         let mode_bytes = &body[i..sp];
-        let mode =
-            core::str::from_utf8(mode_bytes).map_err(|_| "tree mode not UTF-8")?.to_string();
+        let mode = core::str::from_utf8(mode_bytes)
+            .map_err(|_| "tree mode not UTF-8")?
+            .to_string();
 
         // Name up to NUL.
         let after_sp = sp + 1;
@@ -283,7 +284,10 @@ mod tests {
                      message body\n";
         let refs = parse_commit_refs(body).unwrap();
         assert_eq!(refs.tree, "7d4a466af82cd6857c85c0296d5c23fc68cba887");
-        assert_eq!(refs.parents, vec!["3a21d1d7f95fda510925f0e5e2566abf137fb490"]);
+        assert_eq!(
+            refs.parents,
+            vec!["3a21d1d7f95fda510925f0e5e2566abf137fb490"]
+        );
     }
 
     #[test]

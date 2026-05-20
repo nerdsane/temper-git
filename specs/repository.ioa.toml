@@ -24,6 +24,7 @@
 name = "Repository"
 states = ["Provisioning", "Active", "Archived"]
 initial = "Provisioning"
+allow_indefinite_states = ["Provisioning", "Active"]
 
 # --- Actions ---
 
@@ -96,6 +97,61 @@ hint = "Apply a PullRequest's source_ref onto target_ref. Strategy is one of mer
 effect = [{ type = "trigger", name = "scm_merge_pr" }]
 
 [[action]]
+name = "IngestPack"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+params = ["PackBytes", "RefUpdates", "ClientRequestId"]
+record_parent_event = false
+hint = "Ingest a git receive-pack payload as one governed intent: objects, ref CAS updates, and PR-head updates land atomically."
+effect = [{ type = "trigger", name = "scm_ingest_pack" }]
+
+[[action.cedar_gate]]
+principal = "request.principal"
+resource = "this"
+action = "Repository::IngestPack"
+
+[[action.sub_writes]]
+target_entity = "Blob"
+action = "Create"
+generated_from = "pack_bytes"
+
+[[action.sub_writes]]
+target_entity = "Tree"
+action = "Create"
+generated_from = "pack_bytes"
+
+[[action.sub_writes]]
+target_entity = "Commit"
+action = "Create"
+generated_from = "pack_bytes"
+
+[[action.sub_writes]]
+target_entity = "Tag"
+action = "Create"
+generated_from = "pack_bytes"
+
+[[action.sub_writes]]
+target_entity = "Ref"
+action = "Create"
+generated_from = "ref_updates"
+
+[[action.sub_writes]]
+target_entity = "Ref"
+action = "Update"
+generated_from = "ref_updates"
+
+[[action.sub_writes]]
+target_entity = "Ref"
+action = "Delete"
+generated_from = "ref_updates"
+
+[[action.sub_writes]]
+target_entity = "PullRequest"
+action = "UpdateHead"
+generated_from = "ref_updates"
+
+[[action]]
 name = "Archive"
 kind = "input"
 from = ["Active"]
@@ -156,6 +212,15 @@ name = "scm_merge_pr"
 trigger = "scm_merge_pr"
 type = "wasm"
 module = "scm_merge_pr"
+
+[integration.config]
+timeout_secs = 120
+
+[[integration]]
+name = "scm_ingest_pack"
+trigger = "scm_ingest_pack"
+type = "wasm"
+module = "scm_ingest_pack"
 
 [integration.config]
 timeout_secs = 120

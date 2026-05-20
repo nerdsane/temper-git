@@ -45,8 +45,8 @@ pub use blob::{blob_canonical_bytes, blob_hash};
 pub use commit::{Commit, commit_canonical_bytes, commit_hash};
 pub use mode::Mode;
 pub use parse::{
-    parse_commit, parse_commit_refs, parse_tag, parse_tree, CommitRefs, ParsedCommit,
-    ParsedTag, ParsedTreeEntry,
+    CommitRefs, ParsedCommit, ParsedTag, ParsedTreeEntry, parse_commit, parse_commit_refs,
+    parse_tag, parse_tree,
 };
 pub use sha1::{Sha1, sha1_hex};
 pub use tag::{Tag, tag_canonical_bytes, tag_hash};

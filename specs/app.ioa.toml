@@ -1,0 +1,155 @@
+# App — Genesis registry record pointing at versioned temper-git bytes.
+
+[automaton]
+name = "App"
+states = ["Active", "Deprecated", "Deleted"]
+initial = "Active"
+allow_indefinite_states = ["Active", "Deprecated"]
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["OwnerId", "Name", "RepositoryId", "LatestVersionHash", "Exports", "Description", "Visibility"]
+hint = "Create an App registry row pointing at an existing Repository."
+
+[[action]]
+name = "Update"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["LatestVersionHash", "UpdatedAt"]
+hint = "Update app registry metadata that is advanced by composite actions."
+
+[[action]]
+name = "RegisterNewApp"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+params = ["Name", "RepositoryId", "Description", "Exports", "Visibility"]
+hint = "Register a genesis app. Composite contract creates or updates the App row after the Repository exists."
+
+[[action.triggers]]
+name = "app_registry"
+kind = "wasm"
+module = "app_registry"
+
+[[action.cedar_gate]]
+principal = "request.principal"
+resource = "this"
+action = "App::RegisterNewApp"
+
+[[action.sub_writes]]
+target_entity = "App"
+action = "Create"
+generated_from = "app_metadata"
+
+[[action]]
+name = "Fork"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+params = ["ParentAppId", "ParentVersionHash", "ChildOwnerId", "ChildName", "Description"]
+hint = "Metadata-only fork. Composite contract creates Repository, Ref, App, and Lineage rows atomically."
+
+[[action.triggers]]
+name = "app_registry"
+kind = "wasm"
+module = "app_registry"
+
+[[action.cedar_gate]]
+principal = "request.principal"
+resource = "this"
+action = "App::Fork"
+
+[[action.sub_writes]]
+target_entity = "Repository"
+action = "Create"
+generated_from = "child_repository"
+
+[[action.sub_writes]]
+target_entity = "Ref"
+action = "Create"
+generated_from = "parent_version_hash"
+
+[[action.sub_writes]]
+target_entity = "App"
+action = "Create"
+generated_from = "child_app_metadata"
+
+[[action.sub_writes]]
+target_entity = "Lineage"
+action = "Create"
+generated_from = "fork_metadata"
+
+[[action]]
+name = "PublishNewVersion"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+params = ["NewHash", "RefName"]
+hint = "Advance the backing ref and update LatestVersionHash as one governed intent."
+
+[[action.triggers]]
+name = "app_registry"
+kind = "wasm"
+module = "app_registry"
+
+[[action.cedar_gate]]
+principal = "request.principal"
+resource = "this"
+action = "App::PublishNewVersion"
+
+[[action.sub_writes]]
+target_entity = "Ref"
+action = "Update"
+generated_from = "ref_update"
+
+[[action.sub_writes]]
+target_entity = "App"
+action = "Update"
+generated_from = "new_hash"
+
+[[action]]
+name = "Install"
+kind = "Composite"
+from = ["Active"]
+to = "Active"
+params = ["TargetTenant", "AppRef", "Installer"]
+hint = "Install this pinned Genesis app into a Temper tenant. The spec records AppInstallation; the kernel materializes bytes only after this action succeeds."
+
+[[action.triggers]]
+name = "app_registry"
+kind = "wasm"
+module = "app_registry"
+
+[[action.cedar_gate]]
+principal = "request.principal"
+resource = "this"
+action = "App::Install"
+
+[[action.sub_writes]]
+target_entity = "AppInstallation"
+action = "Create"
+generated_from = "installation_record"
+
+[[action]]
+name = "Deprecate"
+kind = "input"
+from = ["Active"]
+to = "Deprecated"
+params = ["Reason"]
+hint = "Mark the app deprecated while preserving installability by hash."
+
+[[action]]
+name = "Delete"
+kind = "input"
+from = ["Active", "Deprecated"]
+to = "Deleted"
+hint = "Hide the app from registry browse surfaces. Bytes remain content-addressed."
+
+[[invariant]]
+name = "DeletedIsFinal"
+when = ["Deleted"]
+assert = "no_further_transitions"

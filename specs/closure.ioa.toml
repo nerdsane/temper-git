@@ -1,0 +1,23 @@
+# Closure — content-addressed resolved dependency graph for Genesis installs.
+
+[automaton]
+name = "Closure"
+states = ["Durable"]
+initial = "Durable"
+allow_indefinite_states = ["Durable"]
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Durable"]
+to = "Durable"
+params = ["Root", "Resolved", "ResolverVersion", "ResolvedBy"]
+hint = "Persist a deterministic closure row. Id is derived from canonical root + resolved graph + resolver version."
+
+[[action]]
+name = "ResolveClosure"
+kind = "input"
+from = ["Durable"]
+to = "Durable"
+params = ["RootAppId", "RootVersionHash", "ResolverVersion"]
+hint = "Compute and persist a closure for a root app/version pair."

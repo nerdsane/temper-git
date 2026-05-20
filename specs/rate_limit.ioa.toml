@@ -1,0 +1,31 @@
+# RateLimit — per-owner token bucket state for commons mode.
+
+[automaton]
+name = "RateLimit"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["OwnerId", "ActionClass", "Tokens", "Capacity", "RefillPerSecond", "LastRefillAt"]
+hint = "Create a token bucket for an owner/action class."
+
+[[action]]
+name = "Consume"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["Tokens", "LastRefillAt"]
+hint = "Consume tokens from the bucket after refill."
+
+[[action]]
+name = "Refill"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["Tokens", "LastRefillAt"]
+hint = "Refill the token bucket to its configured capacity."

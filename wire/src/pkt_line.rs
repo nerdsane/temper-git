@@ -32,7 +32,10 @@ impl fmt::Display for PktLineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PktLineError::PayloadTooLarge(n) => {
-                write!(f, "pkt-line payload {n} bytes exceeds MAX_PAYLOAD {MAX_PAYLOAD}")
+                write!(
+                    f,
+                    "pkt-line payload {n} bytes exceeds MAX_PAYLOAD {MAX_PAYLOAD}"
+                )
             }
         }
     }

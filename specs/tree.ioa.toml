@@ -17,6 +17,19 @@
 name = "Tree"
 states = ["Durable"]
 initial = "Durable"
+allow_indefinite_states = ["Durable"]
+
+[[state]]
+name = "CanonicalBytes"
+type = "string"
+initial = ""
+query_indexed = false
+
+[[state]]
+name = "CreatedAt"
+type = "string"
+initial = ""
+query_indexed = false
 
 # --- Actions ---
 # Immutable by omission: Create is the only input action. Cedar

@@ -26,12 +26,11 @@ pub mod pack;
 pub mod pkt_line;
 pub mod sideband;
 
-pub use advertise::{advertise_info_refs, AdvertisedRef, Service, ZERO_SHA};
-pub use capabilities::{receive_pack_capabilities, upload_pack_capabilities, AGENT};
-pub use commands::{parse_commands, CommandKind, CommandsError, ParsedCommands, RefCommand};
+pub use advertise::{AdvertisedRef, Service, ZERO_SHA, advertise_info_refs};
+pub use capabilities::{AGENT, receive_pack_capabilities, upload_pack_capabilities};
+pub use commands::{CommandKind, CommandsError, ParsedCommands, RefCommand, parse_commands};
 pub use pack::{
-    emit_pack, parse_pack, ObjectKind, PackEmitter, PackError, PackObject,
-    StreamingPackParser,
+    ObjectKind, PackEmitter, PackError, PackObject, StreamingPackParser, emit_pack, parse_pack,
 };
-pub use pkt_line::{encode, encode_into, flush, PktLineError, MAX_PAYLOAD};
-pub use sideband::{SidebandWriter, CHANNEL_ERROR, CHANNEL_PACK, CHANNEL_PROGRESS};
+pub use pkt_line::{MAX_PAYLOAD, PktLineError, encode, encode_into, flush};
+pub use sideband::{CHANNEL_ERROR, CHANNEL_PACK, CHANNEL_PROGRESS, SidebandWriter};

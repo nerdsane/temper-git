@@ -11,6 +11,7 @@
 name = "Review"
 states = ["Submitted", "Dismissed"]
 initial = "Submitted"
+allow_indefinite_states = ["Submitted"]
 
 # --- Actions ---
 

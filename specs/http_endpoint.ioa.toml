@@ -21,6 +21,7 @@
 name = "HttpEndpoint"
 states = ["Active", "Paused", "Deleted"]
 initial = "Active"
+allow_indefinite_states = ["Active", "Paused"]
 
 # --- Actions ---
 
@@ -29,7 +30,17 @@ name = "Create"
 kind = "input"
 from = ["Active"]
 to = "Active"
-params = ["PathPrefix", "Methods", "IntegrationModule", "RequiresAuth", "TimeoutSecs"]
+params = [
+  "PathPrefix",
+  "Methods",
+  "IntegrationModule",
+  "RequiresAuth",
+  "TimeoutSecs",
+  "ActionBridgeEntityType",
+  "ActionBridgeEntityId",
+  "ActionBridgeAction",
+  "ActionBridgeResponse",
+]
 hint = "Register a new HTTP path prefix. Kernel updates its router match-set."
 
 [[action]]

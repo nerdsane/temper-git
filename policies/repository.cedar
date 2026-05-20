@@ -38,6 +38,19 @@ permit(
    resource.OwnerAccountId == principal.accountId)
 };
 
+// --- App.Fork introduces a backing repository through the spec-declared
+//     sub-write contract. The kernel, not WASM, stamps the action_context
+//     while applying the composite result.
+
+permit(
+  principal,
+  action == Action::"Create",
+  resource is Repository
+) when {
+  principal has action_context &&
+  principal.action_context == "composite:App.Fork"
+};
+
 // --- MarkProvisioned: only the repository_provision integration
 //     (system principal) can transition Provisioning -> Active.
 
@@ -58,7 +71,8 @@ permit(
     Action::"DeleteFile",
     Action::"BatchWriteFiles",
     Action::"CreateBranch",
-    Action::"SetDefaultBranch"
+    Action::"SetDefaultBranch",
+    Action::"IngestPack"
   ],
   resource is Repository
 ) when {
@@ -101,6 +115,7 @@ forbid(
     Action::"BatchWriteFiles",
     Action::"CreateBranch",
     Action::"SetDefaultBranch",
+    Action::"IngestPack",
     Action::"MergePullRequest"
   ],
   resource is Repository

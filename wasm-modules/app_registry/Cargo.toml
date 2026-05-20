@@ -1,0 +1,22 @@
+[package]
+name = "app_registry"
+description = "WASM integration: Genesis App registry Composite sub-write producer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+temper-wasm-sdk = { workspace = true }
+serde_json = { workspace = true }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

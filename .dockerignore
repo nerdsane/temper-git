@@ -1,0 +1,9 @@
+.git
+target
+temper/target
+web/node_modules
+web/build
+web/.svelte-kit
+web/test-results
+**/.DS_Store
+**/*.log

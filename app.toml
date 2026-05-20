@@ -15,6 +15,11 @@ description = "Temper-native, byte-exact, GitHub-compatible SCM. Byte-exact smar
 version = "0.1.0"
 startup_install = "core"
 
+# Default single-operator behavior. Set TEMPER_OS_APP_TEMPER_GIT_MODE=commons
+# when installing this OS app into a public commons kernel; the Temper loader
+# then includes policies/commons/*.cedar as guardrail overlays.
+mode = "operator"
+
 # WASM integrations the app ships. Built per module under
 # `wasm/<name>/target/wasm32-wasip1/release/<name>.wasm` and copied
 # into the image by deploy/Dockerfile.
@@ -31,6 +36,18 @@ startup_loading = "eager"
 
 [[wasm_modules]]
 name = "git_receive_pack"
+target = "wasm32-wasip1"
+criticality = "app-required"
+startup_loading = "eager"
+
+[[wasm_modules]]
+name = "scm_ingest_pack"
+target = "wasm32-wasip1"
+criticality = "app-required"
+startup_loading = "eager"
+
+[[wasm_modules]]
+name = "app_registry"
 target = "wasm32-wasip1"
 criticality = "app-required"
 startup_loading = "eager"

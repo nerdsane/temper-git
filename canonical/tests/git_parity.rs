@@ -12,7 +12,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use tg_canonical::{blob_hash, commit_hash, tag_hash, tree_hash, Commit, Mode, Tag, TreeEntry};
+use tg_canonical::{Commit, Mode, Tag, TreeEntry, blob_hash, commit_hash, tag_hash, tree_hash};
 
 fn git_available() -> bool {
     if std::env::var("TG_SKIP_GIT_PARITY").ok().as_deref() == Some("1") {
@@ -117,7 +117,12 @@ fn git_write_tree(repo: &std::path::Path, entries: &[TreeEntry]) -> String {
     // filesystem.
     for e in entries {
         let mode = e.mode.as_git_str();
-        let cacheinfo = format!("{},{},{}", mode, e.object_sha, String::from_utf8_lossy(&e.name));
+        let cacheinfo = format!(
+            "{},{},{}",
+            mode,
+            e.object_sha,
+            String::from_utf8_lossy(&e.name)
+        );
         let out = Command::new("git")
             .args(["update-index", "--add", "--cacheinfo", &cacheinfo])
             .current_dir(repo)
@@ -375,7 +380,10 @@ fn commit_with_parent_matches_git() {
         "write-tree failed: {}",
         String::from_utf8_lossy(&tree_out.stderr)
     );
-    let tree_sha = String::from_utf8(tree_out.stdout).unwrap().trim().to_string();
+    let tree_sha = String::from_utf8(tree_out.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
     assert_eq!(tree_sha.len(), 40, "tree_sha malformed: {:?}", tree_sha);
 
     let p1 = Command::new("git")
@@ -396,7 +404,12 @@ fn commit_with_parent_matches_git() {
         String::from_utf8_lossy(&p1.stderr)
     );
     let parent_sha = String::from_utf8(p1.stdout).unwrap().trim().to_string();
-    assert_eq!(parent_sha.len(), 40, "parent_sha malformed: {:?}", parent_sha);
+    assert_eq!(
+        parent_sha.len(),
+        40,
+        "parent_sha malformed: {:?}",
+        parent_sha
+    );
 
     let p2 = Command::new("git")
         .env("GIT_AUTHOR_NAME", "T")
@@ -464,7 +477,12 @@ fn annotated_tag_matches_git() {
         .unwrap()
         .trim()
         .to_string();
-    assert_eq!(commit_sha.len(), 40, "commit_sha malformed: {:?}", commit_sha);
+    assert_eq!(
+        commit_sha.len(),
+        40,
+        "commit_sha malformed: {:?}",
+        commit_sha
+    );
     // Build the tag body (no header — `git hash-object -t tag` adds
     // its own `tag <len>\0` header before hashing).
     let tag_body = format!(

@@ -318,6 +318,10 @@
         <Property Name="IntegrationModule"  Type="Edm.String" Nullable="false"/>
         <Property Name="RequiresAuth"       Type="Edm.Boolean" Nullable="false"/>
         <Property Name="TimeoutSecs"        Type="Edm.Int32"   Nullable="false"/>
+        <Property Name="ActionBridgeEntityType" Type="Edm.String"/>
+        <Property Name="ActionBridgeEntityId"   Type="Edm.String"/>
+        <Property Name="ActionBridgeAction"     Type="Edm.String"/>
+        <Property Name="ActionBridgeResponse"   Type="Edm.String"/>
         <Property Name="Status"             Type="Edm.String"  Nullable="false"/>
         <Property Name="CreatedAt"          Type="Edm.DateTimeOffset" Nullable="false"/>
         <Annotation Term="Temper.Vocab.StateMachine.States">
@@ -329,6 +333,149 @@
         </Annotation>
         <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/http_endpoint.cedar"/>
+      </EntityType>
+
+      <!-- ============ Owner ============ -->
+      <EntityType Name="Owner">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"                Type="Edm.String" Nullable="false"/>
+        <Property Name="AccountId"         Type="Edm.String" Nullable="false"/>
+        <Property Name="DisplayName"       Type="Edm.String" Nullable="false"/>
+        <Property Name="Contact"           Type="Edm.String"/>
+        <Property Name="StorageCapBytes"   Type="Edm.Int64"  Nullable="false"/>
+        <Property Name="RateLimitTier"     Type="Edm.String" Nullable="false"/>
+        <Property Name="PublicKey"         Type="Edm.String"/>
+        <Property Name="VerificationProvider" Type="Edm.String"/>
+        <Property Name="VerificationSubject"  Type="Edm.String"/>
+        <Property Name="VerificationRequestedAt" Type="Edm.DateTimeOffset"/>
+        <Property Name="VerifiedAt"        Type="Edm.DateTimeOffset"/>
+        <Property Name="Status"            Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt"         Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt"         Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="SuspendedAt"       Type="Edm.DateTimeOffset"/>
+        <Property Name="SuspensionReason"  Type="Edm.String"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>PendingVerification</String>
+            <String>Verified</String>
+            <String>Suspended</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="PendingVerification"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/owner.cedar"/>
+      </EntityType>
+
+      <!-- ============ App ============ -->
+      <EntityType Name="App">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"                 Type="Edm.String" Nullable="false"/>
+        <Property Name="OwnerId"            Type="Edm.String" Nullable="false"/>
+        <Property Name="Name"               Type="Edm.String" Nullable="false"/>
+        <Property Name="RepositoryId"       Type="Edm.String" Nullable="false"/>
+        <Property Name="LatestVersionHash"  Type="Edm.String" Nullable="false"/>
+        <Property Name="Exports"            Type="Edm.String" Nullable="false"/>
+        <Property Name="Description"        Type="Edm.String"/>
+        <Property Name="Visibility"         Type="Edm.String" Nullable="false"/>
+        <Property Name="Status"             Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt"          Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt"          Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="DeprecatedAt"       Type="Edm.DateTimeOffset"/>
+        <Property Name="DeprecationReason"  Type="Edm.String"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Active</String>
+            <String>Deprecated</String>
+            <String>Deleted</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="OwnerId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/app.cedar"/>
+      </EntityType>
+
+      <!-- ============ AppInstallation ============ -->
+      <EntityType Name="AppInstallation">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"            Type="Edm.String" Nullable="false"/>
+        <Property Name="AppId"         Type="Edm.String" Nullable="false"/>
+        <Property Name="AppRef"        Type="Edm.String" Nullable="false"/>
+        <Property Name="VersionHash"   Type="Edm.String" Nullable="false"/>
+        <Property Name="TargetTenant"  Type="Edm.String" Nullable="false"/>
+        <Property Name="ClosureId"     Type="Edm.String"/>
+        <Property Name="Installer"     Type="Edm.String"/>
+        <Property Name="Message"       Type="Edm.String"/>
+        <Property Name="Status"        Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt"     Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="InstalledAt"   Type="Edm.DateTimeOffset"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Pending</String>
+            <String>Installed</String>
+            <String>Failed</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Pending"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="TargetTenant"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/app.cedar"/>
+      </EntityType>
+
+      <!-- ============ Lineage ============ -->
+      <EntityType Name="Lineage">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"                  Type="Edm.String" Nullable="false"/>
+        <Property Name="ChildRepositoryId"   Type="Edm.String" Nullable="false"/>
+        <Property Name="ParentRepositoryId"  Type="Edm.String" Nullable="false"/>
+        <Property Name="ParentCommit"        Type="Edm.String" Nullable="false"/>
+        <Property Name="Type"                Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedBy"           Type="Edm.String" Nullable="false"/>
+        <Property Name="Mutations"           Type="Edm.String" Nullable="false"/>
+        <Property Name="Status"              Type="Edm.String" Nullable="false"/>
+        <Property Name="CreatedAt"           Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="UpdatedAt"           Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="ChildRepositoryId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/lineage.cedar"/>
+      </EntityType>
+
+      <!-- ============ Closure ============ -->
+      <EntityType Name="Closure">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"               Type="Edm.String" Nullable="false"/>
+        <Property Name="Root"             Type="Edm.String" Nullable="false"/>
+        <Property Name="Resolved"         Type="Edm.String" Nullable="false"/>
+        <Property Name="ResolverVersion"  Type="Edm.String" Nullable="false"/>
+        <Property Name="ResolvedAt"       Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="ResolvedBy"       Type="Edm.String" Nullable="false"/>
+        <Property Name="Status"           Type="Edm.String" Nullable="false"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection><String>Durable</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Durable"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Root"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/closure.cedar"/>
+      </EntityType>
+
+      <!-- ============ RateLimit ============ -->
+      <EntityType Name="RateLimit">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id"               Type="Edm.String" Nullable="false"/>
+        <Property Name="OwnerId"          Type="Edm.String" Nullable="false"/>
+        <Property Name="ActionClass"      Type="Edm.String" Nullable="false"/>
+        <Property Name="Tokens"           Type="Edm.Int64"  Nullable="false"/>
+        <Property Name="Capacity"         Type="Edm.Int64"  Nullable="false"/>
+        <Property Name="RefillPerSecond"  Type="Edm.Int64"  Nullable="false"/>
+        <Property Name="LastRefillAt"     Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="Status"           Type="Edm.String" Nullable="false"/>
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection><String>Active</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Active"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="OwnerId"/>
+        <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/rate_limit.cedar"/>
       </EntityType>
 
       <!-- ============ Entity Container ============ -->
@@ -346,6 +493,12 @@
         <EntitySet Name="GitTokens"      EntityType="Temper.Git.GitToken"/>
         <EntitySet Name="Webhooks"       EntityType="Temper.Git.Webhook"/>
         <EntitySet Name="HttpEndpoints"  EntityType="Temper.Git.HttpEndpoint"/>
+        <EntitySet Name="Owners"         EntityType="Temper.Git.Owner"/>
+        <EntitySet Name="Apps"           EntityType="Temper.Git.App"/>
+        <EntitySet Name="AppInstallations" EntityType="Temper.Git.AppInstallation"/>
+        <EntitySet Name="Lineages"       EntityType="Temper.Git.Lineage"/>
+        <EntitySet Name="Closures"       EntityType="Temper.Git.Closure"/>
+        <EntitySet Name="RateLimits"     EntityType="Temper.Git.RateLimit"/>
       </EntityContainer>
     </Schema>
   </edmx:DataServices>

@@ -17,6 +17,31 @@
 name = "Blob"
 states = ["Durable"]
 initial = "Durable"
+allow_indefinite_states = ["Durable"]
+
+[[state]]
+name = "Content"
+type = "string"
+initial = ""
+query_indexed = false
+
+[[state]]
+name = "Size"
+type = "int"
+initial = "0"
+query_indexed = false
+
+[[state]]
+name = "CanonicalBytes"
+type = "string"
+initial = ""
+query_indexed = false
+
+[[state]]
+name = "CreatedAt"
+type = "string"
+initial = ""
+query_indexed = false
 
 # --- Actions ---
 #

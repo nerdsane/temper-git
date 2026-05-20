@@ -24,7 +24,7 @@
 //!   application/x-git-receive-pack-advertisement  for push
 
 use crate::capabilities::{receive_pack_capabilities, upload_pack_capabilities};
-use crate::pkt_line::{encode_into, flush, PktLineError};
+use crate::pkt_line::{PktLineError, encode_into, flush};
 
 /// Which service is being advertised on `/info/refs?service=...`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +157,9 @@ mod tests {
         let s = body_str(&out);
         // First ref line includes NUL followed by capabilities.
         let first = s.find(sha).expect("sha must appear");
-        let nul = s[first..].find('\0').expect("first ref line must have NUL separator");
+        let nul = s[first..]
+            .find('\0')
+            .expect("first ref line must have NUL separator");
         let caps_start = first + nul + 1;
         assert!(s[caps_start..].contains("side-band-64k"));
     }
@@ -167,8 +169,14 @@ mod tests {
         let sha1 = "0123456789abcdef0123456789abcdef01234567";
         let sha2 = "89abcdef0123456789abcdef0123456789abcdef";
         let refs = &[
-            AdvertisedRef { sha: sha1, name: "HEAD" },
-            AdvertisedRef { sha: sha2, name: "refs/heads/main" },
+            AdvertisedRef {
+                sha: sha1,
+                name: "HEAD",
+            },
+            AdvertisedRef {
+                sha: sha2,
+                name: "refs/heads/main",
+            },
         ];
         let out = advertise_info_refs(Service::UploadPack, refs).unwrap();
         let s = body_str(&out);
@@ -184,7 +192,10 @@ mod tests {
         // Build a known-size ref line and verify the 4-byte hex
         // length prefix is correct.
         let sha = "a".repeat(40);
-        let refs = &[AdvertisedRef { sha: &sha, name: "refs/heads/x" }];
+        let refs = &[AdvertisedRef {
+            sha: &sha,
+            name: "refs/heads/x",
+        }];
         let out = advertise_info_refs(Service::UploadPack, refs).unwrap();
 
         // Skip preamble (001e + 26 + 0000 = 34 bytes).

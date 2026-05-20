@@ -1,0 +1,85 @@
+# AppInstallation — record of a Genesis app install into a Temper tenant.
+
+[automaton]
+name = "AppInstallation"
+states = ["Pending", "Installed", "Failed"]
+initial = "Pending"
+allow_indefinite_states = ["Installed", "Failed"]
+
+[[state]]
+name = "AppId"
+type = "string"
+initial = ""
+query_indexed = true
+
+[[state]]
+name = "AppRef"
+type = "string"
+initial = ""
+query_indexed = true
+
+[[state]]
+name = "VersionHash"
+type = "string"
+initial = ""
+query_indexed = true
+
+[[state]]
+name = "TargetTenant"
+type = "string"
+initial = ""
+query_indexed = true
+
+[[state]]
+name = "ClosureId"
+type = "string"
+initial = ""
+query_indexed = true
+
+[[state]]
+name = "Installer"
+type = "string"
+initial = ""
+query_indexed = false
+
+[[state]]
+name = "Message"
+type = "string"
+initial = ""
+query_indexed = false
+
+[[state]]
+name = "CreatedAt"
+type = "string"
+initial = ""
+query_indexed = false
+
+[[state]]
+name = "InstalledAt"
+type = "string"
+initial = ""
+query_indexed = false
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Pending"]
+to = "Pending"
+params = ["AppId", "AppRef", "VersionHash", "TargetTenant", "ClosureId", "Installer", "Message", "CreatedAt"]
+hint = "Record that a spec-owned Genesis app installation has been requested."
+
+[[action]]
+name = "MarkInstalled"
+kind = "input"
+from = ["Pending", "Failed"]
+to = "Installed"
+params = ["ClosureId", "Message", "InstalledAt"]
+hint = "Mark the requested installation as materialized and installed by the platform bridge."
+
+[[action]]
+name = "MarkFailed"
+kind = "input"
+from = ["Pending"]
+to = "Failed"
+params = ["Message", "InstalledAt"]
+hint = "Mark the requested installation as failed by the platform bridge."

@@ -1,0 +1,67 @@
+# Owner — registry account for Genesis apps.
+
+[automaton]
+name = "Owner"
+states = ["PendingVerification", "Verified", "Suspended"]
+initial = "PendingVerification"
+allow_indefinite_states = ["PendingVerification", "Verified", "Suspended"]
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["PendingVerification"]
+to = "PendingVerification"
+params = ["AccountId", "DisplayName", "Contact", "StorageCapBytes", "RateLimitTier", "PublicKey", "VerificationProvider", "VerificationSubject", "VerificationRequestedAt"]
+hint = "Create a registry owner account that must be verified before it can publish to commons."
+
+[[action]]
+name = "RequestVerification"
+kind = "input"
+from = ["PendingVerification"]
+to = "PendingVerification"
+params = ["VerificationProvider", "VerificationSubject", "VerificationRequestedAt"]
+hint = "Record the configured provider-specific verification challenge for this owner."
+
+[[action]]
+name = "MarkVerified"
+kind = "input"
+from = ["PendingVerification", "Verified"]
+to = "Verified"
+params = ["VerificationProvider", "VerificationSubject", "VerifiedAt"]
+hint = "Operator/provider action proving the authenticated principal controls this owner account."
+
+[[action]]
+name = "UpdateProfile"
+kind = "input"
+from = ["Verified"]
+to = "Verified"
+params = ["DisplayName", "Contact", "PublicKey"]
+hint = "Update public owner profile metadata."
+
+[[action]]
+name = "SetQuota"
+kind = "input"
+from = ["Verified"]
+to = "Verified"
+params = ["StorageCapBytes", "RateLimitTier"]
+hint = "Operator action to adjust quota and rate-limit tier."
+
+[[action]]
+name = "Suspend"
+kind = "input"
+from = ["PendingVerification", "Verified"]
+to = "Suspended"
+params = ["Reason"]
+hint = "Suspend this owner account."
+
+[[action]]
+name = "Unsuspend"
+kind = "input"
+from = ["Suspended"]
+to = "PendingVerification"
+hint = "Restore this owner account to the verification queue."
+
+[[invariant]]
+name = "SuspendedBlocksOwnerWrites"
+when = ["Suspended"]
+assert = "owner_namespace_write_denied"

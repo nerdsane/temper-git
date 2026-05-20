@@ -1,0 +1,23 @@
+# Lineage — metadata-only fork and mutation history sidecar.
+
+[automaton]
+name = "Lineage"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+
+[[action]]
+name = "Create"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["ChildRepositoryId", "ParentRepositoryId", "ParentCommit", "Type", "CreatedBy", "Mutations"]
+hint = "Record a fork or future merge relationship between repositories."
+
+[[action]]
+name = "AddMutation"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["Mutation"]
+hint = "Append a JSON mutation summary such as code_edit, dep_bump, import, or policy_change."

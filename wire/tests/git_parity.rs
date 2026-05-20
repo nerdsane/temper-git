@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use tg_wire::{advertise_info_refs, AdvertisedRef, Service};
+use tg_wire::{AdvertisedRef, Service, advertise_info_refs};
 
 fn git_available() -> bool {
     Command::new("git")
@@ -133,11 +133,7 @@ fn head_commit(repo_dir: &Path) -> Option<String> {
 /// and an object-format advertisement we don't yet emit). We check
 /// those aren't part of the wire shape contract — they're
 /// negotiated, not structural.
-fn compare_advertisements(
-    ours: &[u8],
-    theirs: &[u8],
-    expected_refs: &[AdvertisedRef<'_>],
-) {
+fn compare_advertisements(ours: &[u8], theirs: &[u8], expected_refs: &[AdvertisedRef<'_>]) {
     let o = String::from_utf8_lossy(ours);
     let t = String::from_utf8_lossy(theirs);
 

@@ -24,6 +24,43 @@
 name = "Commit"
 states = ["Durable"]
 initial = "Durable"
+allow_indefinite_states = ["Durable"]
+
+[[state]]
+name = "Author"
+type = "string"
+initial = ""
+query_indexed = false
+
+[[state]]
+name = "Committer"
+type = "string"
+initial = ""
+query_indexed = false
+
+[[state]]
+name = "Message"
+type = "string"
+initial = ""
+query_indexed = false
+
+[[state]]
+name = "PgpSignature"
+type = "string"
+initial = ""
+query_indexed = false
+
+[[state]]
+name = "CanonicalBytes"
+type = "string"
+initial = ""
+query_indexed = false
+
+[[state]]
+name = "CreatedAt"
+type = "string"
+initial = ""
+query_indexed = false
 
 # --- Actions ---
 # Immutable by omission. Cedar denies PATCH/DELETE.

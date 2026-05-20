@@ -10,6 +10,7 @@
 name = "ReviewComment"
 states = ["Open", "Resolved"]
 initial = "Open"
+allow_indefinite_states = ["Open"]
 
 # --- Actions ---
 

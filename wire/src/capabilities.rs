@@ -49,7 +49,13 @@ mod tests {
     #[test]
     fn upload_pack_caps_contain_required() {
         let caps = upload_pack_capabilities();
-        for required in ["multi_ack_detailed", "side-band-64k", "thin-pack", "ofs-delta", AGENT] {
+        for required in [
+            "multi_ack_detailed",
+            "side-band-64k",
+            "thin-pack",
+            "ofs-delta",
+            AGENT,
+        ] {
             assert!(caps.contains(required), "missing {required} in {caps}");
         }
     }

@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Genesis-Only Install Progress</title>
+    <style>
+      :root {
+        color: #20272d;
+        background: #f7f8f6;
+        font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; }
+      main { max-width: 1180px; margin: 0 auto; padding: 28px 20px 44px; }
+      h1, h2, h3, p { margin: 0; }
+      h1 { font-size: clamp(30px, 4vw, 46px); line-height: 1.03; letter-spacing: 0; }
+      h2 { font-size: 17px; }
+      h3 { font-size: 14px; }
+      a { color: #1b716c; text-decoration-thickness: 2px; text-underline-offset: 2px; }
+      code {
+        padding: 2px 5px;
+        border-radius: 5px;
+        background: #edf1ef;
+        color: #243029;
+        font: 12px/1.45 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        word-break: break-word;
+      }
+      .muted { color: #66727a; }
+      .hero, .panel, .metric {
+        border: 1px solid #dde4e0;
+        border-radius: 8px;
+        background: #fff;
+      }
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 280px;
+        gap: 24px;
+        align-items: end;
+        padding: 22px;
+      }
+      .hero-copy { display: grid; gap: 12px; }
+      .meter { height: 12px; border-radius: 999px; background: #e4e9e5; overflow: hidden; }
+      .meter span { display: block; width: 91%; height: 100%; background: #1b716c; }
+      .percent { font-size: 52px; line-height: 1; font-weight: 760; color: #1b716c; }
+      .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+      .metric { padding: 14px; min-height: 92px; display: grid; align-content: space-between; }
+      .metric strong { display: block; font-size: 22px; line-height: 1.15; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+      .panel { padding: 18px; }
+      .wide { grid-column: 1 / -1; }
+      ul { margin: 12px 0 0; padding: 0; list-style: none; display: grid; gap: 9px; }
+      li { display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 9px; align-items: start; }
+      .dot { width: 9px; height: 9px; margin-top: 7px; border-radius: 99px; background: #aeb7b2; }
+      .done { background: #1b716c; }
+      .active { background: #b7791f; }
+      .blocked { background: #b33a32; }
+      table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+      th, td { padding: 10px 8px; border-bottom: 1px solid #e3e9e5; text-align: left; vertical-align: top; }
+      th { color: #66727a; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+      .commands { display: grid; gap: 8px; margin-top: 12px; }
+      .command { border: 1px solid #e3e9e5; border-radius: 8px; padding: 10px; background: #fbfcfb; }
+      .command code { display: block; margin-top: 5px; }
+      @media (max-width: 840px) {
+        .hero, .grid, .metrics { grid-template-columns: 1fr; }
+        .percent { font-size: 42px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="muted">Last updated: 2026-05-20 13:36 EDT</p>
+          <h1>Genesis-Only Install and Railway Deployment</h1>
+          <p class="muted">Two-PR implementation tracking for Temper platform install support plus the Genesis registry, UI, live proof, and Railway packaging.</p>
+          <div class="meter" aria-label="91 percent complete"><span></span></div>
+        </div>
+        <div>
+          <div class="percent">91%</div>
+          <p class="muted">Local implementation and verification are green. Both PR branches are pushed and ready; Railway deployment is blocked by CLI authentication.</p>
+        </div>
+      </header>
+
+      <section class="metrics">
+        <div class="metric"><span class="muted">Temper PR</span><strong><a href="https://github.com/nerdsane/temper/pull/257">#257</a></strong><span class="muted">Pushed and ready</span></div>
+        <div class="metric"><span class="muted">Genesis PR</span><strong><a href="https://github.com/nerdsane/temper-git/pull/5">#5</a></strong><span class="muted">Pushed and ready</span></div>
+        <div class="metric"><span class="muted">Local E2E</span><strong>Pass</strong><span class="muted">OData, TemperPaw-shaped, CLI, restart recovery</span></div>
+        <div class="metric"><span class="muted">Railway E2E</span><strong>Blocked</strong><span class="muted"><code>railway whoami</code> is unauthorized</span></div>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>Done</h2>
+          <ul>
+            <li><span class="dot done"></span><span>Removed the direct WASM <code>host_call</code> path from the active architecture; app install now enters through spec-owned <code>App.Install</code>.</span></li>
+            <li><span class="dot done"></span><span>Added <code>App.Install</code> and <code>AppInstallation</code> in Genesis specs, CSDL, Cedar, and app registry WASM.</span></li>
+            <li><span class="dot done"></span><span>Added Temper post-action install support that materializes pinned Genesis commit trees, installs into the target tenant, and records success/failure.</span></li>
+            <li><span class="dot done"></span><span>Persisted Genesis install refs so target tenants recover from storage without GitHub, local app dirs, submodules, symlinks, or production catalog auto-install.</span></li>
+            <li><span class="dot done"></span><span>Removed runtime app-as-skill aliases and bypass sources: <code>--skill</code>, <code>/api/skills</code>, <code>TEMPER_APP_SOURCES</code>, <code>TEMPER_SKILLS_DIR</code>, legacy <code>./skills</code>, and production catalog auto-install.</span></li>
+            <li><span class="dot done"></span><span>Updated the Genesis UI into a cleaner registry workbench with GitHub-like file browsing and copyable install commands.</span></li>
+            <li><span class="dot done"></span><span>Added root Railway packaging: <code>Dockerfile</code>, <code>.dockerignore</code>, and <code>railway.toml</code>.</span></li>
+            <li><span class="dot done"></span><span>Pushed the two existing ready-for-review PRs: Temper <a href="https://github.com/nerdsane/temper/pull/257">#257</a> and Genesis <a href="https://github.com/nerdsane/temper-git/pull/5">#5</a>.</span></li>
+          </ul>
+        </article>
+
+        <article class="panel">
+          <h2>Remaining</h2>
+          <ul>
+            <li><span class="dot blocked"></span><span>Refresh Railway authentication, link/create the dedicated Genesis service, attach Railway Postgres, deploy, and run the public URL smoke.</span></li>
+            <li><span class="dot"></span><span>After Railway auth is available, verify <code>/healthz</code>, <code>/genesis/</code>, OData metadata, app registration, <code>App.Install</code>, installed app usability, and restart recovery on the public service.</span></li>
+          </ul>
+        </article>
+
+        <article class="panel">
+          <h2>How TemperPaw Uses Genesis</h2>
+          <ul>
+            <li><span class="dot done"></span><span>TemperPaw resolves a pinned Genesis app ref like <code>owner/app@hash</code>.</span></li>
+            <li><span class="dot done"></span><span>It calls the spec-owned OData action <code>POST /tdata/Apps('app-owner-app')/App.Install</code> with the target tenant.</span></li>
+            <li><span class="dot done"></span><span>The equivalent CLI is <code>temper install owner/app@hash --tenant default --url https://genesis.example</code>.</span></li>
+            <li><span class="dot done"></span><span>Only helper skills remain as skills; Temper apps and agent skills inside those apps are loaded from installed Genesis app bundles.</span></li>
+          </ul>
+        </article>
+
+        <article class="panel">
+          <h2>Install Surfaces</h2>
+          <div class="commands">
+            <div class="command">
+              <strong>OData</strong>
+              <code>POST /tdata/Apps('app-owner-name')/App.Install</code>
+            </div>
+            <div class="command">
+              <strong>Temper CLI</strong>
+              <code>temper install owner/name@hash --tenant default --url https://genesis.example</code>
+            </div>
+            <div class="command">
+              <strong>TemperPaw tool</strong>
+              <code>install_app({"source":"genesis","app_ref":"owner/name@hash","tenant":"default","url":"https://genesis.example"})</code>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel wide">
+          <h2>Verification Log</h2>
+          <table>
+            <thead>
+              <tr><th>Check</th><th>Status</th><th>Evidence</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Rust compile</td><td>Pass</td><td><code>cargo check -p temper-cli -p temper-platform -p temper-server</code></td></tr>
+              <tr><td>Temper install tests</td><td>Pass</td><td><code>cargo test -p temper-platform genesis_install</code> and <code>cargo test -p temper-cli genesis_app</code></td></tr>
+              <tr><td>Genesis WASM</td><td>Pass</td><td><code>cargo check -p scm_ingest_pack -p git_upload_pack -p app_registry</code> and <code>cargo test -p app_registry install_sub_write_records_pinned_app_ref</code></td></tr>
+              <tr><td>Genesis web</td><td>Pass</td><td><code>npm run check</code>, <code>npm run build</code>, and <code>npm run test:e2e</code> completed successfully.</td></tr>
+              <tr><td>Local live E2E</td><td>Pass</td><td><code>scripts/live-genesis-install-e2e-smoke.sh</code> pushed <code>genesis-e2e/tiny-notes-130750@c5cd887817b20e91c966aa4191b68405033468e5</code>, registered it, installed it by OData, TemperPaw-shaped request, and CLI, then used the installed <code>Note</code> entity.</td></tr>
+              <tr><td>Restart recovery</td><td>Pass</td><td>After restart, <code>tenant_installed_apps</code> contained <code>paw-odata-130750</code>, <code>paw-tool-130750</code>, and <code>paw-cli-130750</code>; each tenant still read back its installed <code>Note</code>.</td></tr>
+              <tr><td>Browser UI</td><td>Pass</td><td><code>http://127.0.0.1:3188/genesis/</code> showed the pushed app, <code>10 files</code>, <code>8 folders</code>, and the OData, CLI, TemperPaw, and clone commands.</td></tr>
+              <tr><td>Removed bypasses</td><td>Pass</td><td><code>rg</code> found no remaining runtime references to removed skill aliases or bypass env vars.</td></tr>
+              <tr><td>Railway auth</td><td>Blocked</td><td><code>railway --version</code> is <code>4.27.5</code>, but <code>railway whoami</code> returns <code>Unauthorized. Please run railway login again.</code></td></tr>
+            </tbody>
+          </table>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

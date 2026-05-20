@@ -42,6 +42,28 @@ permit(
    principal.scopes.contains("admin:repos"))
 };
 
+// --- App registry composites create and advance backing refs through the
+//     spec-declared sub-write contract. The kernel stamps action_context while
+//     applying the composite result; WASM only returns data.
+
+permit(
+  principal,
+  action == Action::"Create",
+  resource is Ref
+) when {
+  principal has action_context &&
+  principal.action_context == "composite:App.Fork"
+};
+
+permit(
+  principal,
+  action == Action::"Update",
+  resource is Ref
+) when {
+  principal has action_context &&
+  principal.action_context == "composite:App.PublishNewVersion"
+};
+
 // --- ForceUpdate: repo:write AND `force`.
 
 permit(

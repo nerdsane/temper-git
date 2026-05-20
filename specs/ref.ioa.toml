@@ -18,6 +18,7 @@
 name = "Ref"
 states = ["Active", "Deleted"]
 initial = "Active"
+allow_indefinite_states = ["Active"]
 
 # --- Actions ---
 

@@ -16,6 +16,7 @@
 name = "GitToken"
 states = ["Active", "Revoked"]
 initial = "Active"
+allow_indefinite_states = ["Active"]
 
 # --- Actions ---
 

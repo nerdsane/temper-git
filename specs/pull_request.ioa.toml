@@ -23,6 +23,7 @@
 name = "PullRequest"
 states = ["Draft", "Open", "UnderReview", "Approved", "ChangesRequested", "Merged", "Closed"]
 initial = "Draft"
+allow_indefinite_states = ["Draft", "Open", "UnderReview", "Approved", "ChangesRequested"]
 
 # --- Actions ---
 
@@ -47,7 +48,7 @@ name = "UpdateHead"
 kind = "input"
 from = ["Open", "UnderReview", "ChangesRequested", "Approved"]
 to = "Open"
-params = ["NewHeadCommitSha"]
+params = ["NewHeadCommitSha", "HeadCommitSha"]
 hint = "Emitted by receive-pack when a push lands on SourceRef. Resets state to Open (stale review flag is on Approval)."
 
 [[action]]

@@ -16,6 +16,7 @@
 name = "TreeEntry"
 states = ["Durable"]
 initial = "Durable"
+allow_indefinite_states = ["Durable"]
 
 # --- Actions ---
 # Immutable by omission. Cedar denies PATCH/DELETE.

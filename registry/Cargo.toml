@@ -1,0 +1,18 @@
+[package]
+name = "genesis-registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64 = "0.22"
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tg-canonical = { path = "../canonical" }
+toml = "0.8"
+
+[[bin]]
+name = "closure-id"
+path = "src/bin/closure_id.rs"

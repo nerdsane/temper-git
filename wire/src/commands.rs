@@ -85,7 +85,10 @@ impl fmt::Display for CommandsError {
         match self {
             CommandsError::Truncated => write!(f, "command stream truncated"),
             CommandsError::BadLengthPrefix(p) => write!(f, "bad pkt-line length: {:02x?}", p),
-            CommandsError::LengthOverflow { declared, remaining } => write!(
+            CommandsError::LengthOverflow {
+                declared,
+                remaining,
+            } => write!(
                 f,
                 "pkt-line declared {declared} bytes, only {remaining} remain"
             ),
@@ -111,12 +114,11 @@ pub fn parse_commands(buf: &[u8]) -> Result<ParsedCommands, CommandsError> {
             return Err(CommandsError::Truncated);
         }
         let len_slice = &buf[cursor..cursor + 4];
-        let len_str =
-            std::str::from_utf8(len_slice).map_err(|_| {
-                let mut p = [0u8; 4];
-                p.copy_from_slice(len_slice);
-                CommandsError::BadLengthPrefix(p)
-            })?;
+        let len_str = std::str::from_utf8(len_slice).map_err(|_| {
+            let mut p = [0u8; 4];
+            p.copy_from_slice(len_slice);
+            CommandsError::BadLengthPrefix(p)
+        })?;
         let declared = usize::from_str_radix(len_str, 16).map_err(|_| {
             let mut p = [0u8; 4];
             p.copy_from_slice(len_slice);
@@ -179,10 +181,7 @@ pub fn parse_commands(buf: &[u8]) -> Result<ParsedCommands, CommandsError> {
         {
             let caps_str = std::str::from_utf8(caps_bytes)
                 .map_err(|_| CommandsError::MalformedCommand("non-UTF-8 caps".into()))?;
-            capabilities = caps_str
-                .split_whitespace()
-                .map(|s| s.to_string())
-                .collect();
+            capabilities = caps_str.split_whitespace().map(|s| s.to_string()).collect();
         }
     }
 
@@ -198,7 +197,11 @@ pub fn parse_commands(buf: &[u8]) -> Result<ParsedCommands, CommandsError> {
 }
 
 fn validate_sha(s: &str) -> Result<(), CommandsError> {
-    if s.len() != 40 || !s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+    if s.len() != 40
+        || !s
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
         return Err(CommandsError::MalformedCommand(format!(
             "sha must be 40 lowercase hex chars, got {:?}",
             s
@@ -238,11 +241,9 @@ mod tests {
     #[test]
     fn single_create_command() {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&pkt(
-            b"0000000000000000000000000000000000000000 \
+        buf.extend_from_slice(&pkt(b"0000000000000000000000000000000000000000 \
               1111111111111111111111111111111111111111 \
-              refs/heads/main\0report-status side-band-64k agent=git/2.50\n",
-        ));
+              refs/heads/main\0report-status side-band-64k agent=git/2.50\n"));
         buf.extend_from_slice(b"0000");
         let parsed = parse_commands(&buf).unwrap();
         assert_eq!(parsed.commands.len(), 1);
@@ -258,11 +259,9 @@ mod tests {
     #[test]
     fn pack_offset_points_past_flush() {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&pkt(
-            b"0000000000000000000000000000000000000000 \
+        buf.extend_from_slice(&pkt(b"0000000000000000000000000000000000000000 \
               2222222222222222222222222222222222222222 \
-              refs/heads/main\0report-status\n",
-        ));
+              refs/heads/main\0report-status\n"));
         buf.extend_from_slice(b"0000");
         buf.extend_from_slice(b"PACK-bytes-follow-here");
         let parsed = parse_commands(&buf).unwrap();
@@ -272,16 +271,12 @@ mod tests {
     #[test]
     fn multiple_commands_capabilities_only_first() {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&pkt(
-            b"0000000000000000000000000000000000000000 \
+        buf.extend_from_slice(&pkt(b"0000000000000000000000000000000000000000 \
               aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-              refs/heads/main\0report-status\n",
-        ));
-        buf.extend_from_slice(&pkt(
-            b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+              refs/heads/main\0report-status\n"));
+        buf.extend_from_slice(&pkt(b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
               cccccccccccccccccccccccccccccccccccccccc \
-              refs/heads/feature\n",
-        ));
+              refs/heads/feature\n"));
         buf.extend_from_slice(b"0000");
         let parsed = parse_commands(&buf).unwrap();
         assert_eq!(parsed.commands.len(), 2);
@@ -291,11 +286,9 @@ mod tests {
     #[test]
     fn delete_command_classified() {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&pkt(
-            b"dddddddddddddddddddddddddddddddddddddddd \
+        buf.extend_from_slice(&pkt(b"dddddddddddddddddddddddddddddddddddddddd \
               0000000000000000000000000000000000000000 \
-              refs/heads/stale\0report-status\n",
-        ));
+              refs/heads/stale\0report-status\n"));
         buf.extend_from_slice(b"0000");
         let parsed = parse_commands(&buf).unwrap();
         assert_eq!(parsed.commands[0].kind(), CommandKind::Delete);
@@ -303,11 +296,9 @@ mod tests {
 
     #[test]
     fn missing_flush_rejected() {
-        let buf = pkt(
-            b"0000000000000000000000000000000000000000 \
+        let buf = pkt(b"0000000000000000000000000000000000000000 \
               1111111111111111111111111111111111111111 \
-              refs/heads/main\n",
-        );
+              refs/heads/main\n");
         let err = parse_commands(&buf).unwrap_err();
         assert!(matches!(err, CommandsError::Truncated));
     }
@@ -321,11 +312,9 @@ mod tests {
     #[test]
     fn uppercase_hex_sha_rejected() {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&pkt(
-            b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+        buf.extend_from_slice(&pkt(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
               1111111111111111111111111111111111111111 \
-              refs/heads/main\0report-status\n",
-        ));
+              refs/heads/main\0report-status\n"));
         buf.extend_from_slice(b"0000");
         assert!(matches!(
             parse_commands(&buf).unwrap_err(),
@@ -336,11 +325,9 @@ mod tests {
     #[test]
     fn whitespace_in_refname_rejected() {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&pkt(
-            b"0000000000000000000000000000000000000000 \
+        buf.extend_from_slice(&pkt(b"0000000000000000000000000000000000000000 \
               1111111111111111111111111111111111111111 \
-              refs/heads/bad\x09name\0report-status\n",
-        ));
+              refs/heads/bad\x09name\0report-status\n"));
         buf.extend_from_slice(b"0000");
         assert!(matches!(
             parse_commands(&buf).unwrap_err(),

@@ -11,8 +11,8 @@
 //! same input. No trailing newline is added; the raw content is
 //! emitted verbatim.
 
-use crate::sha1::Sha1;
 use crate::Oid;
+use crate::sha1::Sha1;
 
 /// Build the exact byte sequence git-core uses as the input to SHA-1
 /// for a blob of `content` bytes.

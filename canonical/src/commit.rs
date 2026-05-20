@@ -19,8 +19,8 @@
 //! with a trailing `\n` on the message; we do NOT add one — we trust
 //! the caller's `message` field.
 
-use crate::sha1::Sha1;
 use crate::Oid;
+use crate::sha1::Sha1;
 
 /// A commit in structured form. Use [`commit_canonical_bytes`] /
 /// [`commit_hash`] to serialize.

@@ -153,11 +153,12 @@ cargo test
 #    kernel). They compile to wasm32-wasip1 because that's how Temper
 #    runs sandboxed code; nothing about the wire protocol cares.
 rustup target add wasm32-wasip1
-cargo build -p git_upload_pack -p git_receive_pack \
+cargo build -p git_upload_pack -p git_receive_pack -p scm_ingest_pack \
   --target wasm32-wasip1 --release
-mkdir -p wasm/git_upload_pack wasm/git_receive_pack
+mkdir -p wasm/git_upload_pack wasm/git_receive_pack wasm/scm_ingest_pack
 cp target/wasm32-wasip1/release/git_upload_pack.wasm wasm/git_upload_pack/
 cp target/wasm32-wasip1/release/git_receive_pack.wasm wasm/git_receive_pack/
+cp target/wasm32-wasip1/release/scm_ingest_pack.wasm wasm/scm_ingest_pack/
 ```
 
 Then start the kernel. It runs with an embedded database and loads the
@@ -168,7 +169,7 @@ temper-git bundle from the current directory:
 TEMPER_OS_APPS_DIR="$PWD" cargo run \
   --manifest-path temper/Cargo.toml \
   --release --bin temper \
-  -- serve --port 3000 --storage turso --skill temper-git
+  -- serve --port 3000 --storage turso --app temper-git
 ```
 
 In another terminal, register the wire-protocol routes and create a
@@ -179,7 +180,7 @@ repository:
 for row in \
   '{"Id":"he-info-refs","PathPrefix":"/{owner}/{repo}.git/info/refs","Methods":"GET","IntegrationModule":"git_upload_pack","RequiresAuth":false,"TimeoutSecs":60}' \
   '{"Id":"he-upload-pack","PathPrefix":"/{owner}/{repo}.git/git-upload-pack","Methods":"POST","IntegrationModule":"git_upload_pack","RequiresAuth":false,"TimeoutSecs":300}' \
-  '{"Id":"he-receive-pack","PathPrefix":"/{owner}/{repo}.git/git-receive-pack","Methods":"POST","IntegrationModule":"git_receive_pack","RequiresAuth":false,"TimeoutSecs":300}'
+  '{"Id":"he-receive-pack","PathPrefix":"/{owner}/{repo}.git/git-receive-pack","Methods":"POST","IntegrationModule":"git_receive_pack","RequiresAuth":false,"TimeoutSecs":300,"ActionBridgeEntityType":"Repository","ActionBridgeEntityId":"rp-{owner}-{repo}","ActionBridgeAction":"IngestPack","ActionBridgeResponse":"git-receive-pack"}'
 do
   curl -sX POST -H "Content-Type: application/json" -d "$row" \
     http://127.0.0.1:3000/tdata/HttpEndpoints

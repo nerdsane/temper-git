@@ -19,8 +19,8 @@
 //! Unlike commits, tag PGP signatures are appended **after** the message
 //! (not emitted as a `gpgsig` header). Don't conflate the two.
 
-use crate::sha1::Sha1;
 use crate::Oid;
+use crate::sha1::Sha1;
 
 /// An annotated tag in structured form.
 #[derive(Debug, Clone, PartialEq, Eq)]

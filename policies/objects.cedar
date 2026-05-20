@@ -3,9 +3,10 @@
 // Git objects are append-only and content-addressed by SHA-1: their
 // identity IS their bytes. Cedar here is only a read gate, piggy-backed
 // on the owning repository's visibility. Writes are not addressed
-// here — object rows are produced exclusively by the scm_write_file /
-// scm_merge_pr / git_receive_pack integrations, which run as system
-// principals.
+// here — object rows are produced by spec-triggered integrations such
+// as scm_write_file, scm_merge_pr, and Repository.IngestPack's
+// scm_ingest_pack result path, which the kernel applies as declared
+// composite sub-writes.
 //
 // Reads: any principal that can read Repository with the same
 // RepositoryId can read the object.
@@ -73,8 +74,8 @@ permit(
 
 // --- Writes: only system principals (integrations) may create object
 //     rows. Human / agent writes flow through Repository actions
-//     (WriteFile, BatchWriteFiles) or through git_receive_pack, which
-//     itself runs as system after auth.
+//     (WriteFile, BatchWriteFiles, IngestPack); integrations return
+//     data and the kernel applies declared composite sub-writes.
 
 permit(
   principal,

@@ -6,6 +6,13 @@ Cargo.lock.bak
 # WASM build artifacts
 wasm-modules/*/target/
 
+# Frontend build artifacts
+web/.svelte-kit/
+web/build/
+web/node_modules/
+web/test-results/
+web/playwright-report/
+
 # Temper submodule build artifacts (when populated)
 /temper/target/
 
